@@ -1,0 +1,17 @@
+*.zip
+*.jpg
+*.swf
+*.log
+target
+tags
+vendor
+dist
+test-results.xml
+test/vendor
+test/karma-ci.conf.coffee
+node_modules
+bower_components
+npm_debug.log
+/.projectile
+*.log
+*.swp
