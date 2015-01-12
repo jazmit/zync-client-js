@@ -1,0 +1,4 @@
+#!/bin/bash
+sed "s;autoWatch.*$;singleRun: true;" test/karma.conf.coffee > test/karma-ci.conf.coffee
+node_modules/karma/bin/karma start test/karma-ci.conf.coffee 
+rm test/karma-ci.conf.coffee

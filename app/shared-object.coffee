@@ -131,7 +131,7 @@ SOFactory = (getUser, wsrouter) ->
         else if isChange(op) then op.d
         else if isModify(op) then 1
         else
-            throw new Error "Unknown array op #{op}"
+            throw new Error "Unknown array op #{spliceOpToString op}"
     
     # Length of the slice produced by this array operation
     postLen = (op) ->
@@ -139,7 +139,7 @@ SOFactory = (getUser, wsrouter) ->
         else if isChange(op) then op.i.length
         else if isModify(op) then 1
         else
-            throw new Error "Unknown array op #{op}"
+            throw new Error "Unknown array op #{spliceOpToString op}"
 
     # Split an array operation to apply to two smaller chunks
     opSplit = (op, n) ->
@@ -163,7 +163,7 @@ SOFactory = (getUser, wsrouter) ->
         else
             if isChange(op)
                 # TODO: make sure this is always consistent
-                [{i: op.i.substring(0, n), d: op.d}, {i: op.i.substring(n), d: 0}]
+                [{i: op.i.slice(0, n), d: op.d}, {i: op.i.slice(n), d: 0}]
             else if isModify(op)
                 throw new Error 'Cannot split modify'
             else
@@ -189,7 +189,7 @@ SOFactory = (getUser, wsrouter) ->
         else
             throw new Error "Cannot convert #{JSON.stringify spliceOp} to string"
 
-    # TODO test
+    # Convert an op to a compact string representation for debugging
     opToString = (opType, op) ->
       switch opType
           when 'Splice'
@@ -243,7 +243,7 @@ SOFactory = (getUser, wsrouter) ->
                         opOnM   = opsOnM[0]
                         opType  = opOnM.substring(0, opOnM.length - 3)
                         opValue = arrOp[opOnM]
-                        slice.map( (el) => applyInnerOp(el, opType, opValue))
+                        slice.map( (el) => apply(el, opType, opValue))
             if _.isString result then result += newSlice
             else result.push newSlice...
             n += l
@@ -252,7 +252,7 @@ SOFactory = (getUser, wsrouter) ->
         unless _.isString result then Object.freeze result else result
 
 
-    applyInnerOp = (target, opType, opValue) ->
+    apply = (target, opType, opValue) ->
         switch opType
             when 'Update', 'Replace'
                 # Simple 'Set' operation
@@ -260,7 +260,7 @@ SOFactory = (getUser, wsrouter) ->
             when 'Splice'
                 # Splice on a string or array
                 applyArrayOp(opValue, target)
-            when 'Json'
+            when 'JsonOp'
                 applyJsonOp(target, opValue)
             else
                 throw new Error "Unknown opType #{opType}"
@@ -289,7 +289,7 @@ SOFactory = (getUser, wsrouter) ->
                 if key of ops
                     # There is an operation which needs to be applied here
                     [opType, opValue] = ops[key]
-                    applyInnerOp(value, opType, opValue)
+                    apply(value, opType, opValue)
                 else if key in opsAtDepth
                     # Apply sub-op to sub-object
                     applyJsonOp(target[key], opObject[key])
@@ -603,9 +603,11 @@ SOFactory = (getUser, wsrouter) ->
                 throw new Error 'Unknown op type'
 
 
-    # Compose single splices of identical length, eg: {Update$$m: 3}, 1, {d: 1}
+    # Compose single splices of identical length as a . b
+    # ie: b is applied first
+    # eg: {Update$$m: 3}, {i: [5], d: 0}
     composeSplice = (a, b) ->
-        unless postLen(a) == preLen(b) and postLen(a) > 0
+        unless postLen(b) == preLen(a) and postLen(b) > 0
             throw "Illegal compose of splices #{spliceOpToString a} and #{spliceOpToString b}"
         if isKeep(a)
             # a keep op in a doesn't affect b
@@ -613,12 +615,13 @@ SOFactory = (getUser, wsrouter) ->
         else if isKeep(b)
             # a keep op in b doesn't affect a
             a
-        else if isChange(b)
-            # b deletes whatever was modified in a
-            b
         else if isChange(a)
+            # a deletes whatever was modified in b
+            { d: preLen(b), i: a.i }
+        else if isChange(b)
             # An insert in a which is modified in b
-            throw new Error 'Impossible case?'
+            # Must apply a to contents of b
+            { d: b.d, i: applyArrayOp([a], b.i) }
         else
             # Check for two modify ops
             # TODO: switch to use isModify
@@ -636,49 +639,62 @@ SOFactory = (getUser, wsrouter) ->
             else
                 throw new Error "Cannot compose #{JSON.stringify a} and #{JSON.stringify b}"
 
-    # Composes splice operations of identical length on a whole array, eg: [1, {i: 'Hi'}, 3] with [2, {d: 1}, 1]
+    # Composes splice operations of identical length on a whole array a.b
+    # ie, b is applied before a
+    # eg: [1, {i: 'Hi'}, 2] with [2, {d: 1}, 1]
     composeSplices = (a, b) ->
         # If a and b are Nil, we are finished
         if a.length == 0 and b.length == 0 then return []
 
         # Check for 0-postLength operations in a, which can be passed through
         a0 = _.head(a)
-        if a0? and postLen(a0) == 0
+        if a0? and preLen(a0) == 0
             return [a0].concat composeSplices(_.tail(a), b)
 
         # Check for 0-preLength operations in b, which can be passed through
         b0 = _.head(b)
-        if b0? and preLen(b0) == 0
+        if b0? and postLen(b0) == 0
             return [b0].concat composeSplices(a, _.tail(b))
 
         if b.length == 0 and a.length > 0 or a.length == 0 and b.length > 0
-            throw new Error 'Composed slices of unequal length'
+            throw new Error "Composed slices of unequal length #{JSON.stringify a} and #{JSON.stringify b}"
 
-        la = postLen(a0)
-        lb = preLen(b0)
+        la = preLen(a0)
+        lb = postLen(b0)
         remA = _.tail(a)
         remB = _.tail(b)
         if la > lb
             # Splice up the first op in a, compose the matching slices and recurse
-            [a0, a1] = opPostSplit(a0, lb)
+            [a0, a1] = opSplit(a0, lb)
             [composeSplice(a0, b0)].concat composeSplices([a1].concat(remA), remB)
         else if lb > la
             # Slice up the first op in b, compose the matching slices and recurse
-            [b0, b1] = opSplit(b0, la)
+            [b0, b1] = opPostSplit(b0, la)
             [composeSplice(a0, b0)].concat composeSplices(remA, [b1].concat(remB))
-        else
-            # No slicing needed, just compose the matching slices and recuse
+        else # la == lb
+            # No slicing needed, just compose the matching slices and recurse
             [composeSplice(a0, b0)].concat composeSplices(remA, remB)
 
+    # Compose two operation a and b as a.b, ie: b is applied first
     compose = (aType, a, bType, b) ->
-        if aType != bType
-            throw new Error "Cannot compose different op types #{aType} and #{bType}"
-        if aType == 'JsonOp'
+        if aType == 'Update' or aType == 'Replace'
+            # The update on the second op wins
+            [aType, a]
+        else if a == undefined
+            # a is identity operation
+            [bType, b]
+        else if b == undefined
+            # b is identity operation
+            [aType, a]
+        else if bType == 'Update' or bType == 'Replace'
+            # b updates the object and a operated on the updated value
+            [bType, apply(b, aType, a)]
+        else if aType == 'JsonOp' and bType == 'JsonOp'
             ['JsonOp', composeJsonOps(a, b)]
-        else if aType == 'Splice'
+        else if aType == 'Splice' and bType == 'Splice'
             ['Splice', composeSplices(a, b)]
         else
-            throw new Error 'Unimplemented'
+            throw new Error "Illegal composition of #{aType} and #{bType}"
 
     composeJsonOps = (a, b) ->
         # Make a record of all ops on a and b
@@ -822,6 +838,8 @@ SOFactory = (getUser, wsrouter) ->
             @sentToServer += 1
 
     SOState :: commit = (ops...) ->
+
+        # The first op applied is at the beginning of ops
         ops = @unappliedOps.concat(ops)
         if ops.length == 0
             return
@@ -834,7 +852,8 @@ SOFactory = (getUser, wsrouter) ->
                 opToTranspose = transposeJsonOp(opToTranspose, op)[0]
             transposedOps.push opToTranspose
 
-        composedOp = normalizeJsonOp _.foldl(transposedOps, composeJsonOps)
+        # Must reverse the arguments of compose, which takes the last applied op last
+        composedOp = normalizeJsonOp _.foldl(transposedOps, ((b, a) -> composeJsonOps(a, b)))
         log.debug "Committing #{opToString 'JsonOp', composedOp} to #{@uuid}"
 
         # Create a commit for each op
@@ -1197,6 +1216,7 @@ SOFactory = (getUser, wsrouter) ->
             normalizeJsonOp: normalizeJsonOp
             transpose: transpose
             compose: compose
+            apply: apply
     }
 
 

@@ -1,0 +1,22 @@
+{
+  "name": "so-client",
+  "version": "0.0.1",
+  "main": "target/app.js",
+  "dependencies": {
+    "underscore": "~1.6"
+  },
+  "overrides": {
+    "swfobject": {
+      "main": "swfobject/swfobject.js"
+    },
+    "underscore": {
+      "main": "underscore.js"
+    }
+  },
+  "ignore": [
+    "**/.*",
+    "node_modules",
+    "bower_components",
+    "test"
+  ]
+}
