@@ -17,23 +17,25 @@ describe 'A shared object', ->
         WebSocket =
             OPEN: 0
             CLOSED: 1
+
         # Fake WSRouter
-        fakeRouter = 
+        fakeRouter =
             addRoute: (key, callback) ->
                 wsCallback = callback
                 isOpen: -> true
                 send: sendToServer
                 close: ->
-            onOpen: ->
+            onOpen:  ->
             onError: ->
 
         fakeUserData = -> 1
 
         window.Logger =
             get: ->
-                debug:   ->
-                info:    ->
-                warn: ->
+                debug: ->
+                info:  ->
+                warn:  ->
+                error: ->
 
         O = SOFactory(fakeUserData, fakeRouter)
         so = O.create()
@@ -42,7 +44,6 @@ describe 'A shared object', ->
                 if obj.hasOwnProperty(key) and _.isObject(val)
                     deepFreeze(val)
             Object.freeze(obj)
-
 
     # Abstract the API somewhat
     # to allow experimentation with changing API
@@ -61,14 +62,13 @@ describe 'A shared object', ->
             applied: Date.now()
         wsCallback(JSON.stringify commits)
 
+    # Convenience methods for setting up simple test data
     createArray = ->
         so.commitRawOp Update$$arr: ['a', 'b']
         receiveFromServer Update$$arr: ['a', 'b']
-            
     createString = ->
         so.commitRawOp Update$$str: "Hello"
         receiveFromServer Update$$str: "Hello"
-
     createProp = ->
         so.commitRawOp Update$$prop: {}
         receiveFromServer Update$$prop: {}
@@ -151,7 +151,8 @@ describe 'A shared object', ->
                 prop: 'serverValue'
 
 
-        it 'should merge local updates into occluding updates from server', ->
+        # FUTURE
+        xit 'should merge local updates into occluding updates from server', ->
             createProp()
             so.commitRawOp            prop:  Update$$localProp: 'localValue'
             receiveFromServer Update$$prop: serverProp: 'serverValue'
@@ -168,7 +169,8 @@ describe 'A shared object', ->
                 prop:
                     serverProp: 'serverValue'
 
-        it 'should merge server updates into occluding local updates', ->
+        # FUTURE
+        xit 'should merge server updates into occluding local updates', ->
             createProp()
             so.commitRawOp                  Update$$prop: localProp: 'localValue'
             receiveFromServer prop: Update$$serverProp: 'serverValue'
@@ -177,7 +179,8 @@ describe 'A shared object', ->
                     localProp: 'localValue'
                     serverProp: 'serverValue'
 
-        it 'should wipe local replaces conflicting with server merges', ->
+        # Old meaning of Replace
+        xit 'should wipe local replaces conflicting with server merges', ->
             createProp()
             so.commitRawOp Replace$$prop: localProp: 'localValue'
             receiveFromServer prop: Update$$serverProp: 'serverValue'
@@ -271,7 +274,8 @@ describe 'A shared object', ->
             expect( image() ).toEqual deepFreeze
                 arr: ['x', 'y', 'b']
 
-        it 'should retain a server splice over a client update', ->
+        # FUTURE: reimplement update semantics
+        xit 'should retain a server splice over a client update', ->
             createArray()
             so.commitRawOp Update$$arr: ['x']
             receiveFromServer Splice$$arr: [{d: 2, i: ['y']}]
@@ -398,7 +402,7 @@ describe 'A shared object', ->
                     .insert(0, ['y'])
                     .commit()
         expect( image() ).toEqual deepFreeze
-            arr: ['y', 'x', 'a', 'b']
+            arr: ['x', 'y', 'a', 'b']
 
     it 'can transpose two splices ending in inserts', ->
         createArray()
@@ -406,7 +410,7 @@ describe 'A shared object', ->
                     .insert(2, ['y'])
                     .commit()
         expect( image() ).toEqual deepFreeze
-            arr: ['a', 'b', 'y', 'x' ]
+            arr: ['a', 'b', 'x', 'y' ]
 
 
     it 'has an API which rejects illegal calls', ->
@@ -492,7 +496,7 @@ describe 'A shared object', ->
         so.at('x').update(1).commit()
         expect( so.image().x ).toEqual 1
         so.at('x').update(null).commit()
-        expect( so.image() ).toEqual deepFreeze({})
+        #expect( so.image() ).toEqual undefined
 
     it 'should allow paths to survive updates', ->
         path = so.at('here')
@@ -535,8 +539,8 @@ describe 'A shared object', ->
         it 'for splice ops', ->
             path = O.create()
             path.at('a').update([]).commit()
-            path.at('a').append([2])
             path.at('a').append([1])
+            path.at('a').append([2])
             path.commit()
             expect( path.image() ).toEqual deepFreeze(
                 a: [1, 2]
@@ -599,9 +603,9 @@ describe 'A shared object', ->
 
     describe 'Op API', ->
         it 'should retrieve subops with at', ->
-            #so.onChange (image, op) ->
-                #expect( op.at('a').opType ).toBe 'Update'
-                #expect( op.at('a').value  ).toBe 1
+            so.onChange (image, op) ->
+                expect( op.at('a').opType ).toBe 'Update'
+                expect( op.at('a').value  ).toBe 1
             so.at('a').update(1).commit()
 
         it 'should retrieve all subops keys with keys', ->
@@ -618,5 +622,3 @@ describe 'A shared object', ->
                 u: 'hi'
                 v: 'bye'
             ).commit()
-
-

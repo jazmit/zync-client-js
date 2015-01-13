@@ -70,7 +70,8 @@ SOFactory = (getUser, wsrouter) ->
     # Updates the given image and notifies listeners
     updateImage = (ops, target) ->
         for op in ops
-            target = applyJsonOp(target, op)
+            opType = if !op? then undefined else 'JsonOp'
+            target = apply(target, opType, op)
         target
 
     updateListeners = (commits, target, listeners, isInitialState) ->
@@ -125,6 +126,10 @@ SOFactory = (getUser, wsrouter) ->
     isModify = (op) ->
         _.isObject(op.m) or _.find(_.keys(op), (key) => key.indexOf("$$") > 0 )
 
+    parseModify = (op) ->
+        key = _.keys(op)[0]
+        [opOf(key)[0], op[key]]
+
     # Length of slice to which this array operation can be applied
     preLen = (op) ->
         if _.isNumber(op) then op
@@ -148,7 +153,6 @@ SOFactory = (getUser, wsrouter) ->
             [n, op - n]
         else
             if isChange(op)
-                # TODO: make sure this is always consistent
                 [{i: op.i, d: n}, {i: (if _.isString(op.i) then "" else []), d: op.d - n}]
             else if isModify(op)
                 throw new Error 'Cannot split modify operation'
@@ -162,7 +166,6 @@ SOFactory = (getUser, wsrouter) ->
             [n, op - n]
         else
             if isChange(op)
-                # TODO: make sure this is always consistent
                 [{i: op.i.slice(0, n), d: op.d}, {i: op.i.slice(n), d: 0}]
             else if isModify(op)
                 throw new Error 'Cannot split modify'
@@ -191,7 +194,8 @@ SOFactory = (getUser, wsrouter) ->
 
     # Convert an op to a compact string representation for debugging
     opToString = (opType, op) ->
-      switch opType
+      if !opType? then 'Id'
+      else switch opType
           when 'Splice'
               "<#{_.map(op, spliceOpToString).join(' ')}>"
           when 'JsonOp'
@@ -229,21 +233,13 @@ SOFactory = (getUser, wsrouter) ->
             l        = preLen(arrOp)
             slice    = spliceTarget.slice(n, n+l)
             newSlice =
-                if _.isNumber arrOp then slice # Keep op
-                else if arrOp.i? then arrOp.i  # Replace or Insert
-                else if arrOp.d? then []       # Delete, works for Strings!
-                else if arrOp.m? then slice.map( (el) => applyJsonOp(el, arrOp.m) )
-                else
-                    opsOnM = _.filter(_.keys(arrOp), (s) => s.substring(s.length - 3) == '$$m')
-                    if opsOnM.length == 0
-                        throw new Error "Illegal array op #{JSON.stringify arrOp}"
-                    else if opsOnM.length > 1
-                        throw new Error "More than one op on m in #{JSON.stringify arrOp}"
-                    else
-                        opOnM   = opsOnM[0]
-                        opType  = opOnM.substring(0, opOnM.length - 3)
-                        opValue = arrOp[opOnM]
-                        slice.map( (el) => apply(el, opType, opValue))
+                if _.isNumber arrOp
+                    slice # Keep op
+                else if isChange(arrOp)
+                    arrOp.i  # Replace or Insert
+                else if isModify(arrOp)
+                    [opType, opValue]  = parseModify(arrOp)
+                    slice.map( (el) => apply(el, opType, opValue) )
             if _.isString result then result += newSlice
             else result.push newSlice...
             n += l
@@ -253,7 +249,10 @@ SOFactory = (getUser, wsrouter) ->
 
 
     apply = (target, opType, opValue) ->
-        switch opType
+        if !opType?
+            # Identity operation
+            return target
+        else switch opType
             when 'Update', 'Replace'
                 # Simple 'Set' operation
                 opValue
@@ -269,6 +268,7 @@ SOFactory = (getUser, wsrouter) ->
     # Apply an operation to an object, returning a new object
     # FUTURE: make this prettier/more efficient with Zippers?
     applyJsonOp = (target, opObject) ->
+
         unless _.isObject(target) and _.isObject(opObject) and !_.isArray(target) and !_.isArray(opObject)
             throw new Error "Undefined op (#{JSON.stringify opObject}) or target (#{JSON.stringify target})"
 
@@ -316,13 +316,20 @@ SOFactory = (getUser, wsrouter) ->
         newObject = {}
         for key, value of opObject
             [opType, prop] = opOf(key)
-            switch opType
+            newValue = switch opType
                 when 'Splice'
                     normalize2 = (a, b) ->
-                        if _.isNumber(a) and _.isNumber(b)
+                        if isKeep(a) and isKeep(b)
                             [a + b]
-                        # TODO merge Change and Delete
-                        #else if _.isObject(a) and _.isObject(b) and !hasModify(a) and !hasModify(b)
+                        else if isChange(a) and isChange(b)
+                            newI = 
+                                if _.isString(a.i) and _.isString(b.i)
+                                    a.i + b.i
+                                else if _.isArray(a.i) and _.isArray(b.i)
+                                    a.i.concat b.i
+                                else
+                                    throw new Error 'Unexpected inserts'
+                            [{d: a.d + b.d, i: newI}]
                         else
                             [a, b]
 
@@ -330,7 +337,13 @@ SOFactory = (getUser, wsrouter) ->
                     for spliceOp in value
                         # First check for recursion
                         if isModify(spliceOp)
-                            normalizeJsonOp(spliceOp)
+                            spliceOp = normalizeJsonOp(spliceOp)
+                            if !spliceOp?
+                                spliceOp = 1 # Keep(1)
+
+                        # Skip non-ops such as {d: 0, i: []}
+                        if postLen(spliceOp) == 0 and preLen(spliceOp) == 0
+                            continue
 
                         # No normalization needed on first op
                         if newSplice.length == 0
@@ -340,15 +353,26 @@ SOFactory = (getUser, wsrouter) ->
                         else
                             lastSpliceOp = newSplice.pop()
                             newSplice.push(normalize2(lastSpliceOp, spliceOp)...)
-                    newObject[key] = newSplice
+                    if newSplice.length == 0 or newSplice.length == 1 and isKeep(newSplice[0])
+                        null
+                    else
+                        newSplice
                 when 'JsonOp'
                     # Just recurse
-                    newObject[key] = normalizeJsonOp(value)
+                    normalizeJsonOp(value)
                 else
-                    newObject[key] = value
+                    value
+
+            if opType in ['Update', 'Replace'] or newValue?
+                # Reject undefined as the identity operation,
+                # but keep Update: undefined and Replace: undefined as delete
+                newObject[key] = newValue
 
         # make the operation immutable
-        Object.freeze(newObject)
+        if _.keys(newObject).length == 0
+            null # JSON.stringify returns "null" rather than null for undefined
+        else
+            Object.freeze(newObject)
 
     transposeSpliceOp = (a, b) ->
 
@@ -368,124 +392,117 @@ SOFactory = (getUser, wsrouter) ->
             [postLen(b), {i: b.i, d: postLen(a)}]
         # Recurse for modify slices
         else if isModify(a) and isModify(b)
-            [resMA, resMB] = transposeJsonOp(a, b)
+            [aType, aOp] = parseModify(a)
+            [bType, bOp] = parseModify(b)
+            [resAType, resA, resBType, resB] = transpose(aType, aOp, bType, bOp)
+            newA =
+                if resA?
+                    addOpToObject({}, 'm', resAType, resA)
+                else
+                    1
+            newB =
+                if resB?
+                    addOpToObject({}, 'm', resBType, resB)
+                else
+                    1
+            [newA, newB]
         else
             throw new Error "Cannot transpose #{spliceOpToString a} and #{spliceOpToString b}"
 
-    # Transpose two operations against each other
-    transpose = (aType, a, bType, b) ->
+    transposeSplice = (a, b) ->
         NO_MORE_ELEMENTS = {}
-        if aType == 'Splice' and bType == 'Splice'
-            # Create arrays to receive the transpose result
-            [resAs, resBs] = [[], []]
-            # Reverse the input and make it writeable ready for processing
-            [aOps, bOps] = [clone(a).reverse(), clone(b).reverse()]
+        # Create arrays to receive the transpose result
+        [resAs, resBs] = [[], []]
+        # Reverse the input and make it writeable ready for processing
+        [aOps, bOps] = [clone(a).reverse(), clone(b).reverse()]
 
-            # Read through the ops until all are transposed
-            while (aOps.length > 0 || bOps.length > 0)
-                nextA = if aOps.length > 0 then aOps.pop() else NO_MORE_ELEMENTS
-                nextB = if bOps.length > 0 then bOps.pop() else NO_MORE_ELEMENTS
+        # Read through the ops until all are transposed
+        while (aOps.length > 0 || bOps.length > 0)
+            nextA = if aOps.length > 0 then aOps.pop() else NO_MORE_ELEMENTS
+            nextB = if bOps.length > 0 then bOps.pop() else NO_MORE_ELEMENTS
 
-                unless nextA? and nextB?
-                    throw new Error "Encountered null while transposing #{opToString aType, a} and #{opToString bType, b}"
+            unless nextA? and nextB?
+                throw new Error "Encountered null while transposing #{opToString 'Splice', a} and #{opToString 'Splice', b}"
 
-                # Deal with the case of trailing inserts which cannot
-                # be paired with anything for transposition
-                if nextA == NO_MORE_ELEMENTS
-                    if preLen(nextB) > 0 then throw new Error "Second operand of splice transpose #{opToString aType, a}, #{opToString bType, b} too long"
-                    resBs.push(nextB)
-                    # Certain that postLen(nextB) > 0
-                    resAs.push(postLen(nextB))
-                    continue
-                if nextB == NO_MORE_ELEMENTS
-                    if preLen(nextA) > 0 
-                        throw new Error "First operand of splice transpose #{opToString aType, a}, #{opToString bType, b} too long"
-                    resAs.push(nextA)
-                    # Certain that postLen(nextA) > 0
-                    resBs.push(postLen(nextA))
-                    continue
+            # Deal with the case of trailing inserts which cannot
+            # be paired with anything for transposition
+            if nextA == NO_MORE_ELEMENTS
+                if preLen(nextB) > 0 then throw new Error "Second operand of splice transpose #{opToString 'Splice', a}, #{opToString bType, b} too long"
+                resBs.push(nextB)
+                # Certain that postLen(nextB) > 0
+                resAs.push(postLen(nextB))
+                continue
+            if nextB == NO_MORE_ELEMENTS
+                if preLen(nextA) > 0 
+                    throw new Error "First operand of splice transpose #{opToString 'Splice', a}, #{opToString 'Splice', b} too long"
+                resAs.push(nextA)
+                # Certain that postLen(nextA) > 0
+                resBs.push(postLen(nextA))
+                continue
 
-                # Split the operations into matching chunks and 
-                # put the remainder back into the input
-                [la, lb] = [preLen(nextA), preLen(nextB)]
-                [splitA, splitB] =
-                    if la == 0
-                        # A has no prelength, deal with it first
-                        bOps.push nextB
-                        [nextA, 0]
-                    else if lb == 0
-                        # B has no prelength, deal with it first
-                        aOps.push nextA
-                        [0, nextB]
-                    else if la == lb
-                        [nextA, nextB]
-                    else if la > lb
-                        [newA, rem] = opSplit(nextA, lb)
-                        aOps.push rem
-                        [newA, nextB]
-                    else if lb > la
-                        [newB, rem] = opSplit(nextB, la)
-                        bOps.push rem
-                        [nextA, newB]
+            # Split the operations into matching chunks and 
+            # put the remainder back into the input
+            [la, lb] = [preLen(nextA), preLen(nextB)]
+            [splitA, splitB] =
+                if lb == 0
+                    # A has no prelength, deal with it first
+                    aOps.push nextA
+                    [0, nextB]
+                else if la == 0
+                    # B has no prelength, deal with it first
+                    bOps.push nextB
+                    [nextA, 0]
+                else if la == lb
+                    [nextA, nextB]
+                else if la > lb
+                    [newA, rem] = opSplit(nextA, lb)
+                    aOps.push rem
+                    [newA, nextB]
+                else if lb > la
+                    [newB, rem] = opSplit(nextB, la)
+                    bOps.push rem
+                    [nextA, newB]
 
-                # Transpose the now matching chunks
+            # Transpose the now matching chunks
+            if isChange(splitA) and isChange(splitB)
+                if postLen(splitB) > 0
+                    resAs.push postLen(splitB)
+                if postLen(splitA) > 0
+                    resAs.push {i: splitA.i, d: 0}
+                if postLen(splitB) > 0
+                    resBs.push {i: splitB.i, d: 0}
+                if postLen(splitA) > 0
+                    resBs.push postLen(splitA)
+            else
                 [resA, resB] = transposeSpliceOp(splitA, splitB)
                 if !resA? or !resB?
                     throw new Error "Produced null result (#{JSON.stringify resA}, #{JSON.stringify resB}) transposing #{JSON.stringify splitA}, #{JSON.stringify splitB}"
                 resAs.push resA if resA != 0
                 resBs.push resB if resB != 0
-            [resAs, resBs]
+        [resAs, resBs]
 
-        else if (aType? and bType?) or aType == 'Replace' or bType == 'Replace'
-            # Direct conflict between client and server
-            # server wins
-            [a, undefined]
-        else if !aType? and !bType?
-            throw new Error 'Only call transpose after recursion'
-        else if !aType?
-            # Shortcut for dealing with reversed arguments
-            [a_, b_] = transpose(bType, b, aType, a)
-            [b_, a_]
 
-        # From here on, we know that aType? and !bType?
-        else if aType == 'Update'
-            # b must have operations inside it
-            # Alter a to include operations in b so it doesn't overwrite them
-            # when applied after b
-            [applyJsonOp(a, b), b]
-        else if aType == 'Splice'
-            # Alter property indices in b to take account of splice a
-            [index, nReplace, elements] = a
-            newB = {}
-            for key, value of b
-                # Deal with indices like Update$$1 and 1
-                [opType, opIndex] =
-                    if key.indexOf('$$') > 0 then key.split('$$')
-                    else [undefined, key]
-                opIndex = parseInt(opIndex) # Ensure that opIndex is a number
-
-                # Count up the insertions and deletions before this point
-                n = 0
-                x = 0
-                for arrOp in a
-                    if arrOp.i? then n += arrOp.i.length
-                    if arrOp.d? then n -= arrOp.d.length
-                    x += preLen(arrOp)
-                    if x > opIndex then break
-
-                # Do the essential renumbering to account for the splice
-                opIndex += n
-
-                # Convert back to Update$$1 or 1
-                newKey =
-                    if opType? then opType+'$$'+opIndex
-                    else key
-                newB[newKey] = value
-            [a, newB]
+    # Transpose two operations against each other
+    transpose = (aType, a, bType, b) ->
+        unless aType? and bType?
+            throw 'No type in transpose'
+        if bType == 'Replace' or bType == 'Update'
+            [undefined, undefined, bType, b]
+        else if aType == 'Replace' or aType == 'Update'
+            [aType, a, undefined, undefined]
+        else if aType == 'Splice' and bType == 'Splice'
+            [splA, splB] = transposeSplice(a, b)
+            ['Splice', splA, 'Splice', splB]
+        else if (aType == 'JsonOp') and (bType == 'JsonOp')
+            [jsA, jsB] = transposeJsonOp(a, b)
+            ['JsonOp', jsA, 'JsonOp', jsB]
         else
             throw new Error "Unknown op types #{aType}, #{bType}"
 
     # Transpose two commands, each of which may contain many operations
+    # a: The first argument is the unconfirmed client operation
+    # b: The second argument is the confirmed server operation and has 
+    #    priority where unresolvable conflicts occur
     transposeJsonOp = (a, b) ->
         newA = {}
         newB = {}
@@ -506,21 +523,16 @@ SOFactory = (getUser, wsrouter) ->
         for key in _.union (_.keys dictA), (_.keys dictB)
             [fullKeyA, opTypeA, an] = dictA[key] ? [key, undefined, undefined]
             [fullKeyB, opTypeB, bn] = dictB[key] ? [key, undefined, undefined]
-            [newAn, newBn] =
-                if !dictA[key]? or !dictB[key]?
+            [newAType, newAn, newBType, newBn] =
+                if !opTypeA? or !opTypeB?
                     # One or the other key isn't defined
                     # Just pass through
-                    [an, bn]
-                else if opTypeA != 'JsonOp' or opTypeB != 'JsonOp'
-                    if opTypeA == 'JsonOp' then opTypeA = undefined
-                    if opTypeB == 'JsonOp' then opTypeB = undefined
-                    # One of a and b is an non-Json op, transposition is needed
-                    transpose(opTypeA, an, opTypeB, bn)
+                    [opTypeA, an, opTypeB, bn]
                 else
-                    # an and bn are both Json ops, recurse
-                    transposeJsonOp(an, bn)
-            newA[fullKeyA] = newAn if newAn?
-            newB[fullKeyB] = newBn if newBn?
+                    # Both keys present, recurse
+                    transpose(opTypeA, an, opTypeB, bn)
+            addOpToObject(newA, key, newAType, newAn) if newAn?
+            addOpToObject(newB, key, newBType, newBn) if newBn?
         [newA, newB]
 
     # Alters a path to take account of other operations
@@ -622,22 +634,14 @@ SOFactory = (getUser, wsrouter) ->
             # An insert in a which is modified in b
             # Must apply a to contents of b
             { d: b.d, i: applyArrayOp([a], b.i) }
+        else if isModify(a) and isModify(b)
+            # Modify ops, recurse
+            [opTypeA, opA] = parseModify(a)
+            [opTypeB, opB] = parseModify(b)
+            [newOpType, newOp] = compose(opTypeA, opA, opTypeB, opB)
+            addOpToObject({}, 'm', newOpType, newOp)
         else
-            # Check for two modify ops
-            # TODO: switch to use isModify
-            aKeys = _.keys(a)
-            bKeys = _.keys(b)
-            if aKeys.length == 1 and bKeys.length == 1
-                [opTypeA, keyA] = opOf(aKeys[0])
-                [opTypeB, keyB] = opOf(bKeys[0])
-                if keyA == 'm' and keyB == 'm'
-                    # Recurse
-                    [newOpType, newOp] = compose(opTypeA, a[aKeys[0]], opTypeB, b[bKeys[0]])
-                    addOpToObject({}, 'm', newOpType, newOp)
-                else
-                    throw new Error "Cannot compose #{JSON.stringify a} and #{JSON.stringify b}"
-            else
-                throw new Error "Cannot compose #{JSON.stringify a} and #{JSON.stringify b}"
+            throw new Error "Cannot compose #{JSON.stringify a} and #{JSON.stringify b}"
 
     # Composes splice operations of identical length on a whole array a.b
     # ie, b is applied before a
@@ -854,7 +858,7 @@ SOFactory = (getUser, wsrouter) ->
 
         # Must reverse the arguments of compose, which takes the last applied op last
         composedOp = normalizeJsonOp _.foldl(transposedOps, ((b, a) -> composeJsonOps(a, b)))
-        log.debug "Committing #{opToString 'JsonOp', composedOp} to #{@uuid}"
+        log.debug "Committing #{opToString (if op? then 'JsonOp' else undefined), composedOp} to #{@uuid}"
 
         # Create a commit for each op
         userId = getUser()
@@ -925,7 +929,7 @@ SOFactory = (getUser, wsrouter) ->
                 for localCommit in @localHistory
                     newLocalCommit = clone(localCommit)
                     newLocalCommit.vs += 1
-                    [op, newLocalOp] = transposeJsonOp(op, localCommit.op)
+                    [newLocalOp, op] = transposeJsonOp(localCommit.op, op)
                     newLocalCommit.op = normalizeJsonOp(newLocalOp)
                     newLocalHistory.push newLocalCommit
                 @localHistory = newLocalHistory
@@ -1130,6 +1134,8 @@ SOFactory = (getUser, wsrouter) ->
             @isNull = false
             if @opType in ['Update', 'Replace']
                 @value = @op
+            else if !@opType? or !@op?
+                @isNull = true
             else if @opType == 'JsonOp'
                 unless _.isObject(@op) then throw new Error 'Illegal JsonOp'
             else if @opType == 'Splice'
@@ -1139,9 +1145,7 @@ SOFactory = (getUser, wsrouter) ->
                 for spliceOp in op ? []
                     @preLenSum  += preLen(spliceOp)
                     @postLenSum += postLen(spliceOp)
-            else if !@opType?
-                @isNull = true
-            else 
+            else
                 throw new Error 'Illegal Op'
 
         keys: ->

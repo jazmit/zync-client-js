@@ -22,16 +22,30 @@ var Logger = {
     };
   }
 };
-var SO = SOFactory(function() { return 1; }, fakeWSRouter)
+
+var SO = SOFactory(function() { return 1; }, fakeWSRouter);
+var doNormalize = SO.fnsForUnitTests.normalizeJsonOp;
+
+function apply(targetJson, opString) {
+  var target = JSON.parse(targetJson);
+  var op = JSON.parse(opString);
+  var result = SO.fnsForUnitTests.apply(target, 'JsonOp', op);
+  return JSON.stringify(result)
+};
 function transpose(aString, bString) {
   var a = JSON.parse(aString);
   var b = JSON.parse(bString);
   var result = SO.fnsForUnitTests.transpose('JsonOp', a, 'JsonOp', b);
-  return JSON.stringify(result)
+  return JSON.stringify([doNormalize(result[1]), doNormalize(result[3])])
 };
 function compose(aString, bString) {
   var a = JSON.parse(aString);
   var b = JSON.parse(bString);
   var result = SO.fnsForUnitTests.compose('JsonOp', a, 'JsonOp', b);
-  return JSON.stringify(result[1])
+  return JSON.stringify(doNormalize(result[1]))
 };
+function normalize(opString) {
+    var op = JSON.parse(opString);
+    var result = SO.fnsForUnitTests.normalizeJsonOp(op);
+    return JSON.stringify(result);
+}
