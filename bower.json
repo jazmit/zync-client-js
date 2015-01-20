@@ -1,7 +1,7 @@
 {
   "name": "zync",
   "version": "0.0.1",
-  "main": "target/so-client.js",
+  "main": "target/zync.js",
   "dependencies": {
     "underscore": "~1.6"
   },

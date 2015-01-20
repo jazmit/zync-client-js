@@ -11,7 +11,7 @@ exports.config =
       defaultExtension: 'coffee'
       joinTo:
         # Files that change on every deploy
-        'so-client.js': /^app/
+        'zync.js': /^app/
         # Files that may stay constant between deploys
         'vendor.js': /^(vendor|bower_components)/
         # Unit tests
