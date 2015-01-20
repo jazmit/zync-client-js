@@ -10,13 +10,10 @@ exports.config =
     javascripts:
       defaultExtension: 'coffee'
       joinTo:
-        # Files that change on every deploy
-        'zync.js': /^app/
-        # Files that may stay constant between deploys
+        'zync.js': /^app.shared-object.coffee/
+        'unit-test-stubs.js': /^app.unit-test-stubs/
         'vendor.js': /^(vendor|bower_components)/
-        # Unit tests
         'unit-tests.js': /^test.*.spec.coffee|app.pragmas.js/
-        # FUTURE: integration tests
         'scenarios.js': /^test.*e2e.coffee/
       order:
         before: [
