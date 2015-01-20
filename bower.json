@@ -1,14 +1,11 @@
 {
-  "name": "so-client",
+  "name": "zync",
   "version": "0.0.1",
-  "main": "target/app.js",
+  "main": "target/so-client.js",
   "dependencies": {
     "underscore": "~1.6"
   },
   "overrides": {
-    "swfobject": {
-      "main": "swfobject/swfobject.js"
-    },
     "underscore": {
       "main": "underscore.js"
     }
@@ -17,6 +14,24 @@
     "**/.*",
     "node_modules",
     "bower_components",
-    "test"
-  ]
+    "test",
+    "tests"
+  ],
+  "authors": [
+    "James Smith (http://jazmit.github.io)"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git://github.com/jazmit/zync.git"
+  },
+  "description": "Zync data synchronization library client",
+  "moduleType": [
+    "globals"
+  ],
+  "keywords": [
+    "data",
+    "synchronization"
+  ],
+  "license": "MIT",
+  "homepage": "http://jazmit.github.io/zync"
 }
