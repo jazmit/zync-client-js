@@ -1,6 +1,6 @@
 TODO
 ====
 
-- Write readme
-- Copy across unit tests
-- Incorporate upload to bower
+- [ ] Write readme
+- [ ] Copy across unit tests
+- [ ] Incorporate upload to bower
