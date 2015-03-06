@@ -1259,11 +1259,14 @@ SOFactory = function(getUser, wsrouter) {
       return this.fetch(domain, generateUuid());
     },
     fetch: function(domain, uuid) {
-      log.info("Fetching shared object " + domain + ": " + uuid);
       if (state[uuid] == null) {
+        log.info("Fetching shared object " + domain + ": " + uuid);
         state[uuid] = new SOState(domain, uuid);
       }
       return new Path(state[uuid], []);
+    },
+    isLoaded: function(uuid) {
+      return state[uuid] != null;
     },
     stateOf: function(uuid) {
       return clone(state[uuid]);
