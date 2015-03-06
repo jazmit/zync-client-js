@@ -1206,11 +1206,13 @@ SOFactory = (getUser, wsrouter) ->
             # Fetch the shared object matching this uuid from the server unless $uuidUtils.test(uuid) throw 'Illegal UUID'
             # Unless the so is already here,
             # create a new shared object, and ask the server for updates
-            log.info("Fetching shared object #{domain}: #{uuid}")
             unless state[uuid]?
+                log.info("Fetching shared object #{domain}: #{uuid}")
                 state[uuid] = new SOState(domain, uuid)
             new Path(state[uuid], [])
-            
+
+        isLoaded: (uuid) ->
+            state[uuid]?
 
         # This is mainly for testing purposes
         stateOf: (uuid) ->
