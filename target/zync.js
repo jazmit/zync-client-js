@@ -1,10 +1,92 @@
-var SOFactory,
+var Zync;
+
+if (typeof Zync === "undefined" || Zync === null) {
+  Zync = {};
+}
+
+Zync.Schema = {
+  instantiate: function(type) {
+    var key, recurse, result, subtype, _ref;
+    recurse = Zync.Schema.instantiate;
+    return (function() {
+      var _ref1;
+      if ((_ref = type["default"]) != null) {
+        return _ref;
+      } else {
+        switch (type.name) {
+          case 'any':
+            return void 0;
+          case 'optional':
+            return void 0;
+          case 'number':
+            return 0;
+          case 'string':
+            return '';
+          case 'boolean':
+            return false;
+          case 'dict':
+            return {};
+          case 'list':
+            if ((type.size != null) && type.size > 0) {
+              return _.times(type.size, function() {
+                return recurse(type.subtype);
+              });
+            } else {
+              return [];
+            }
+            break;
+          case 'object':
+            result = {};
+            _ref1 = type.fields;
+            for (key in _ref1) {
+              subtype = _ref1[key];
+              result[key] = recurse(subtype);
+            }
+            return result;
+          default:
+            throw new Error("Type " + type.name + " unknown");
+        }
+      }
+    })();
+  },
+  subtype: function(schema, prop) {
+    if (schema.name === 'any') {
+      return {
+        name: 'any'
+      };
+    } else if (schema.name === 'list' && (prop == null)) {
+      return schema.subtype;
+    } else if (schema.name === 'dict') {
+      return schema.subtype;
+    } else if (schema.name === 'object' && prop in schema.fields) {
+      return schema.fields[prop];
+    } else {
+      throw new Error("Could not find subtype of schema " + (JSON.stringify(schema)) + ", property " + prop);
+    }
+  }
+};
+;var ZyncFactory,
   __indexOf = [].indexOf || function(item) { for (var i = 0, l = this.length; i < l; i++) { if (i in this && this[i] === item) return i; } return -1; },
   __slice = [].slice;
 
-SOFactory = function(getUser, wsrouter) {
-  var Op, Path, SOState, addOpToObject, apply, applyArrayOp, applyJsonOp, clone, commitToString, compose, composeJsonOps, composeSplice, composeSplices, createOp, generateUuid, isChange, isKeep, isModify, isOp, listenerIdGen, log, normalizeJsonOp, opOf, opPostSplit, opSplit, opToString, parseModify, postLen, preLen, routes, spliceOpToString, state, transpose, transposeJsonOp, transposePath, transposeSplice, transposeSpliceOp, updateImage, updateListeners;
+ZyncFactory = function(wsrouter, schemata) {
+  var OFFLINE, ONLINE, Op, Path, REQUESTING_STATE, ZyncState, addOpToObject, apply, applyArrayOp, applyJsonOp, clone, commitToString, compose, composeJsonOps, composeSplice, composeSplices, createOp, deepFreeze, generateUuid, isChange, isKeep, isModify, isOp, listenerIdGen, log, normalizeJsonOp, opOf, opPostSplit, opSplit, opToString, parseModify, postLen, preLen, routes, spliceOpToString, state, subtype, transpose, transposeJsonOp, transposePath, transposeSplice, transposeSpliceOp, updateImage, updateListeners, userId;
   log = Logger.get("so");
+  subtype = Zync.Schema.subtype;
+  userId = void 0;
+  deepFreeze = function(obj) {
+    var key, val;
+    if (!_.isObject(obj)) {
+      return obj;
+    }
+    for (key in obj) {
+      val = obj[key];
+      if (obj.hasOwnProperty(key) && _.isObject(val)) {
+        deepFreeze(val);
+      }
+    }
+    return Object.freeze(obj);
+  };
   generateUuid = function() {
     return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
       var r;
@@ -19,19 +101,21 @@ SOFactory = function(getUser, wsrouter) {
       return JSON.parse(JSON.stringify(obj));
     }
   };
-  updateImage = function(ops, target) {
+  updateImage = function(ops, target, schema) {
     var op, opType, _i, _len;
     for (_i = 0, _len = ops.length; _i < _len; _i++) {
       op = ops[_i];
       opType = op == null ? void 0 : 'JsonOp';
-      target = apply(target, opType, op);
+      target = apply(target, opType, op, schema);
     }
     return target;
   };
-  updateListeners = function(commits, target, listeners, isInitialState) {
+  updateListeners = function(commits, target, listeners, schema, isInitialState) {
     var id, listener, op, ops, _i, _len, _ref, _results;
     ops = _.pluck(commits, 'op');
-    op = ops.length > 0 ? new Op('JsonOp', _.foldl(ops, composeJsonOps)) : isInitialState ? new Op('Update', target) : void 0;
+    op = ops.length > 0 ? new Op('JsonOp', _.foldl(ops, function(a, b) {
+      return composeJsonOps(b, a, schema);
+    })) : isInitialState ? new Op('Update', target) : void 0;
     _results = [];
     for (_i = 0, _len = listeners.length; _i < _len; _i++) {
       _ref = listeners[_i], id = _ref[0], listener = _ref[1];
@@ -171,20 +255,20 @@ SOFactory = function(getUser, wsrouter) {
     }
   };
   spliceOpToString = function(spliceOp) {
-    var keys, modifyOp, opName, opType, _ref;
+    var keys, modifyOp, opName, opType, _ref, _ref1, _ref2;
     if (_.isNumber(spliceOp)) {
       return spliceOp.toString();
     } else if (_.isObject(spliceOp)) {
-      if ((spliceOp.d != null) && (spliceOp.i == null)) {
+      if (spliceOp.d > 0 && ((_ref = spliceOp.i) != null ? _ref.length : void 0) === 0) {
         return "-" + spliceOp.d;
-      } else if ((spliceOp.i != null) && (spliceOp.d == null)) {
+      } else if (((_ref1 = spliceOp.i) != null ? _ref1.length : void 0) > 0 && spliceOp.d === 0) {
         return "+" + (JSON.stringify(spliceOp.i));
       } else if ((spliceOp.i != null) && (spliceOp.d != null)) {
         return "-" + spliceOp.d + "/+" + (JSON.stringify(spliceOp.i));
       } else {
         keys = _.keys(spliceOp);
         modifyOp = keys[0];
-        _ref = opOf(keys[0]), opType = _ref[0], opName = _ref[1];
+        _ref2 = opOf(keys[0]), opType = _ref2[0], opName = _ref2[1];
         if (opName !== 'm') {
           throw new Error("Cannot convert " + (JSON.stringify(spliceOp)) + " to string");
         }
@@ -221,15 +305,17 @@ SOFactory = function(getUser, wsrouter) {
           return "=" + (JSON.stringify(op));
         case 'Replace':
           return "==" + (JSON.stringify(op));
+        case 'Incr':
+          return "+=" + op;
         default:
           throw new Error("Cannot convert " + (JSON.stringify(op)) + " to string");
       }
     }
   };
   commitToString = function(commit) {
-    return "|" + commit.vs + ": " + (opToString('JsonOp', commit.op)) + "|";
+    return "|" + commit.vs + ": " + (opToString((commit.op != null ? 'JsonOp' : void 0), commit.op)) + "|";
   };
-  applyArrayOp = function(opList, spliceTarget) {
+  applyArrayOp = function(opList, spliceTarget, schema) {
     var arrOp, l, n, newSlice, opType, opValue, result, slice, _i, _len, _ref,
       _this = this;
     result = (function() {
@@ -247,7 +333,7 @@ SOFactory = function(getUser, wsrouter) {
       l = preLen(arrOp);
       slice = spliceTarget.slice(n, n + l);
       newSlice = _.isNumber(arrOp) ? slice : isChange(arrOp) ? arrOp.i : isModify(arrOp) ? ((_ref = parseModify(arrOp), opType = _ref[0], opValue = _ref[1], _ref), slice.map(function(el) {
-        return apply(el, opType, opValue);
+        return apply(el, opType, opValue, subtype(schema));
       })) : void 0;
       if (_.isString(result)) {
         result += newSlice;
@@ -265,7 +351,7 @@ SOFactory = function(getUser, wsrouter) {
       return result;
     }
   };
-  apply = function(target, opType, opValue) {
+  apply = function(target, opType, opValue, schema) {
     if (opType == null) {
       return target;
     } else {
@@ -273,34 +359,45 @@ SOFactory = function(getUser, wsrouter) {
         case 'Update':
         case 'Replace':
           return opValue;
+        case 'Incr':
+          if (!_.isNumber(target)) {
+            throw new Error("Increment on " + target);
+          }
+          if (!_.isNumber(opValue)) {
+            throw new Error("Increment with value " + opValue);
+          }
+          return target + opValue;
         case 'Splice':
-          return applyArrayOp(opValue, target);
+          return applyArrayOp(opValue, target, schema);
         case 'JsonOp':
-          return applyJsonOp(target, opValue);
+          return applyJsonOp(target, opValue, schema);
         default:
           throw new Error("Unknown opType " + opType);
       }
     }
   };
-  applyJsonOp = function(target, opObject) {
-    var key, opKey, opType, opValue, ops, opsAtDepth, opsHere, result, value, _i, _len, _ref, _ref1, _ref2, _ref3;
+  applyJsonOp = function(target, opObject, schema) {
+    var key, opKey, opType, opValue, ops, opsAtDepth, opsHere, result, value, _i, _len, _ref, _ref1, _ref2, _ref3, _ref4;
+    if ((_ref = schema.name) !== 'dict' && _ref !== 'object' && _ref !== 'any') {
+      throw new Error("Cannot apply Json Op " + (JSON.stringify(opObject)) + " to schema " + (JSON.stringify(schema)));
+    }
     if (!(_.isObject(target) && _.isObject(opObject) && !_.isArray(target) && !_.isArray(opObject))) {
       throw new Error("Undefined op (" + (JSON.stringify(opObject)) + ") or target (" + (JSON.stringify(target)) + ")");
     }
-    _ref = _.partition(_.keys(opObject), isOp), opsHere = _ref[0], opsAtDepth = _ref[1];
+    _ref1 = _.partition(_.keys(opObject), isOp), opsHere = _ref1[0], opsAtDepth = _ref1[1];
     ops = {};
     for (_i = 0, _len = opsHere.length; _i < _len; _i++) {
       key = opsHere[_i];
-      _ref1 = opOf(key), opType = _ref1[0], opKey = _ref1[1];
+      _ref2 = opOf(key), opType = _ref2[0], opKey = _ref2[1];
       ops[opKey] = [opType, opObject[key]];
     }
     result = _.isArray(target) ? [] : {};
     for (key in target) {
       value = target[key];
-      result[key] = key in ops ? ((_ref2 = ops[key], opType = _ref2[0], opValue = _ref2[1], _ref2), apply(value, opType, opValue)) : __indexOf.call(opsAtDepth, key) >= 0 ? applyJsonOp(target[key], opObject[key]) : target[key];
+      result[key] = key in ops ? ((_ref3 = ops[key], opType = _ref3[0], opValue = _ref3[1], _ref3), apply(value, opType, opValue, subtype(schema, key))) : __indexOf.call(opsAtDepth, key) >= 0 ? applyJsonOp(target[key], opObject[key], subtype(schema, key)) : target[key];
     }
     for (key in ops) {
-      _ref3 = ops[key], opType = _ref3[0], opValue = _ref3[1];
+      _ref4 = ops[key], opType = _ref4[0], opValue = _ref4[1];
       if (!(!(key in target))) {
         continue;
       }
@@ -378,6 +475,13 @@ SOFactory = function(getUser, wsrouter) {
             break;
           case 'JsonOp':
             return normalizeJsonOp(value);
+          case 'Incr':
+            if (value === 0) {
+              return null;
+            } else {
+              return value;
+            }
+            break;
           default:
             return value;
         }
@@ -504,6 +608,8 @@ SOFactory = function(getUser, wsrouter) {
     } else if ((aType === 'JsonOp') && (bType === 'JsonOp')) {
       _ref1 = transposeJsonOp(a, b), jsA = _ref1[0], jsB = _ref1[1];
       return ['JsonOp', jsA, 'JsonOp', jsB];
+    } else if ((aType === 'Incr') && (bType === 'Incr')) {
+      return ['Incr', a, 'Incr', b];
     } else {
       throw new Error("Unknown op types " + aType + ", " + bType);
     }
@@ -597,7 +703,7 @@ SOFactory = function(getUser, wsrouter) {
       }
     }
   };
-  composeSplice = function(a, b) {
+  composeSplice = function(a, b, schema) {
     var newOp, newOpType, opA, opB, opTypeA, opTypeB, _ref, _ref1, _ref2;
     if (!(postLen(b) === preLen(a) && postLen(b) > 0)) {
       throw "Illegal compose of splices " + (spliceOpToString(a)) + " and " + (spliceOpToString(b));
@@ -614,29 +720,29 @@ SOFactory = function(getUser, wsrouter) {
     } else if (isChange(b)) {
       return {
         d: b.d,
-        i: applyArrayOp([a], b.i)
+        i: applyArrayOp([a], b.i, schema)
       };
     } else if (isModify(a) && isModify(b)) {
       _ref = parseModify(a), opTypeA = _ref[0], opA = _ref[1];
       _ref1 = parseModify(b), opTypeB = _ref1[0], opB = _ref1[1];
-      _ref2 = compose(opTypeA, opA, opTypeB, opB), newOpType = _ref2[0], newOp = _ref2[1];
+      _ref2 = compose(opTypeA, opA, opTypeB, opB, subtype(schema)), newOpType = _ref2[0], newOp = _ref2[1];
       return addOpToObject({}, 'm', newOpType, newOp);
     } else {
       throw new Error("Cannot compose " + (JSON.stringify(a)) + " and " + (JSON.stringify(b)));
     }
   };
-  composeSplices = function(a, b) {
+  composeSplices = function(a, b, schema) {
     var a0, a1, b0, b1, la, lb, remA, remB, _ref, _ref1;
     if (a.length === 0 && b.length === 0) {
       return [];
     }
     a0 = _.head(a);
     if ((a0 != null) && preLen(a0) === 0) {
-      return [a0].concat(composeSplices(_.tail(a), b));
+      return [a0].concat(composeSplices(_.tail(a), b, schema));
     }
     b0 = _.head(b);
     if ((b0 != null) && postLen(b0) === 0) {
-      return [b0].concat(composeSplices(a, _.tail(b)));
+      return [b0].concat(composeSplices(a, _.tail(b), schema));
     }
     if (b.length === 0 && a.length > 0 || a.length === 0 && b.length > 0) {
       throw new Error("Composed slices of unequal length " + (JSON.stringify(a)) + " and " + (JSON.stringify(b)));
@@ -647,15 +753,15 @@ SOFactory = function(getUser, wsrouter) {
     remB = _.tail(b);
     if (la > lb) {
       _ref = opSplit(a0, lb), a0 = _ref[0], a1 = _ref[1];
-      return [composeSplice(a0, b0)].concat(composeSplices([a1].concat(remA), remB));
+      return [composeSplice(a0, b0, schema)].concat(composeSplices([a1].concat(remA), remB, schema));
     } else if (lb > la) {
       _ref1 = opPostSplit(b0, la), b0 = _ref1[0], b1 = _ref1[1];
-      return [composeSplice(a0, b0)].concat(composeSplices(remA, [b1].concat(remB)));
+      return [composeSplice(a0, b0, schema)].concat(composeSplices(remA, [b1].concat(remB), schema));
     } else {
-      return [composeSplice(a0, b0)].concat(composeSplices(remA, remB));
+      return [composeSplice(a0, b0, schema)].concat(composeSplices(remA, remB, schema));
     }
   };
-  compose = function(aType, a, bType, b) {
+  compose = function(aType, a, bType, b, schema) {
     if (aType === 'Update' || aType === 'Replace') {
       return [aType, a];
     } else if (a === void 0) {
@@ -663,16 +769,18 @@ SOFactory = function(getUser, wsrouter) {
     } else if (b === void 0) {
       return [aType, a];
     } else if (bType === 'Update' || bType === 'Replace') {
-      return [bType, apply(b, aType, a)];
+      return [bType, apply(b, aType, a, schema)];
     } else if (aType === 'JsonOp' && bType === 'JsonOp') {
-      return ['JsonOp', composeJsonOps(a, b)];
+      return ['JsonOp', composeJsonOps(a, b, schema)];
     } else if (aType === 'Splice' && bType === 'Splice') {
-      return ['Splice', composeSplices(a, b)];
+      return ['Splice', composeSplices(a, b, schema)];
+    } else if (aType === 'Incr' && bType === 'Incr') {
+      return ['Incr', a + b];
     } else {
       throw new Error("Illegal composition of " + aType + " and " + bType);
     }
   };
-  composeJsonOps = function(a, b) {
+  composeJsonOps = function(a, b, schema) {
     var a_, b_, dictA, dictB, key, keys, newOpType, newOpValue, opKey, opType, opTypeA, opTypeB, result, value, _i, _len, _ref, _ref1, _ref2, _ref3, _ref4, _ref5, _ref6;
     result = {};
     dictA = {};
@@ -694,7 +802,7 @@ SOFactory = function(getUser, wsrouter) {
       _ref3 = (_ref2 = dictA[key]) != null ? _ref2 : [key, void 0, void 0], opTypeA = _ref3[0], a_ = _ref3[1];
       _ref5 = (_ref4 = dictB[key]) != null ? _ref4 : [key, void 0, void 0], opTypeB = _ref5[0], b_ = _ref5[1];
       if ((a_ != null) && (b_ != null)) {
-        _ref6 = compose(opTypeA, a_, opTypeB, b_), newOpType = _ref6[0], newOpValue = _ref6[1];
+        _ref6 = compose(opTypeA, a_, opTypeB, b_, subtype(schema, key)), newOpType = _ref6[0], newOpValue = _ref6[1];
         addOpToObject(result, key, newOpType, newOpValue);
       } else if (a_ != null) {
         addOpToObject(result, key, opTypeA, a_);
@@ -706,37 +814,40 @@ SOFactory = function(getUser, wsrouter) {
   };
   state = {};
   routes = {};
-  SOState = function(domain, uuid) {
+  OFFLINE = 'offline';
+  REQUESTING_STATE = 'requesting state';
+  ONLINE = 'online';
+  ZyncState = function(domain, uuid, isCreate, isLocal) {
     var _this = this;
     this.domain = domain;
     this.uuid = uuid;
+    this.isLocal = isLocal;
+    if (schemata[this.domain] == null) {
+      throw new Error("Domain " + this.domain + " not found");
+    }
     this.unappliedOps = [];
     this.localHistory = [];
     this.historyStart = 0;
-    this.localImage = {};
+    this.schema = schemata[this.domain].schema;
     this.sentToServer = 0;
     this.serverHistory = [];
-    this.serverImage = this.localImage;
+    this.serverImage = Zync.Schema.instantiate(this.schema);
+    this.localImage = isCreate ? this.serverImage : void 0;
     this.listeners = [];
+    this.connection = OFFLINE;
     this.requestState = function() {
+      _this.connection = REQUESTING_STATE;
       if (routes[_this.domain] == null) {
         routes[_this.domain] = wsrouter.addRoute(_this.domain, function() {});
       }
-      return routes[_this.domain].send(uuid);
+      return routes[_this.domain].send(_this.uuid);
     };
-    this.commitRoute = wsrouter.addRoute(this.uuid, function(msg) {
-      var commits, deepFreeze, e, newServerCommits, newServerHistoryLength, oldServerHistoryLength, result, transformedCommits;
+    if (this.isLocal) {
+      return this;
+    }
+    this.commitRoute = wsrouter.addRoute("" + this.domain + "/" + this.uuid, function(msg) {
+      var commits, convergenceCommits, e, newServerHistoryLength, obj, oldServerHistoryLength, result, transformedCommits, unseenServerCommits;
       result = void 0;
-      deepFreeze = function(obj) {
-        var key, val;
-        for (key in obj) {
-          val = obj[key];
-          if (obj.hasOwnProperty(key) && _.isObject(val)) {
-            deepFreeze(val);
-          }
-        }
-        return Object.freeze(obj);
-      };
       try {
         result = deepFreeze(JSON.parse(msg));
       } catch (_error) {
@@ -745,56 +856,115 @@ SOFactory = function(getUser, wsrouter) {
         return;
       }
       if (result.image != null) {
-        log.debug("Received image " + (JSON.stringify(result)) + " for " + _this.uuid);
+        log.debug("Received image " + (JSON.stringify(result.image)) + " for " + _this.domain + "/" + _this.uuid);
+        _this.connection = ONLINE;
         oldServerHistoryLength = _this.historyStart + _this.serverHistory.length;
         newServerHistoryLength = result.history.length + result.historyStart;
+        commits = ((function() {
+          var _i, _len, _ref, _results;
+          _ref = result.history;
+          _results = [];
+          for (_i = 0, _len = _ref.length; _i < _len; _i++) {
+            obj = _ref[_i];
+            _results.push(obj);
+          }
+          return _results;
+        })()).reverse();
         if (oldServerHistoryLength > newServerHistoryLength) {
-          throw new Error('Fatal: server sent shorter history than already confirmed');
-        }
-        if (result.historyStart > oldServerHistoryLength) {
-          log.warn("Dropped all local history because server history is too short");
+          log.warn('Server data loss: server sent shorter history than already confirmed');
           _this.localHistory = [];
           _this.serverHistory = [];
           _this.historyStart = result.historyStart;
           _this.unappliedOps = [];
           _this.sentToServer = 0;
           _this.serverImage = _this.localImage = result.image;
-          commits = result.history.reverse();
           transformedCommits = _this.receiveFromServer.apply(_this, commits);
-          updateListeners(transformedCommits, _this.localImage, _this.listeners, true);
-        } else {
-          newServerCommits = _.drop(result.history, oldServerHistoryLength - result.historyStart);
-          log.debug("Adding " + newServerCommits.length + " server commits from server image");
-          transformedCommits = _this.receiveFromServer.apply(_this, newServerCommits);
+          updateListeners(transformedCommits, _this.localImage, _this.listeners, _this.schema, true);
+        }
+        if (result.historyStart > oldServerHistoryLength) {
+          if (oldServerHistoryLength > 0) {
+            log.warn("Dropped all local history for " + _this.uuid + " because server history is too short");
+          }
+          _this.localHistory = [];
+          _this.serverHistory = [];
+          _this.historyStart = result.historyStart;
+          _this.unappliedOps = [];
           _this.sentToServer = 0;
-          updateListeners(transformedCommits, _this.localImage, _this.listeners, true);
+          _this.serverImage = _this.localImage = result.image;
+          transformedCommits = _this.receiveFromServer.apply(_this, commits);
+          updateListeners(convergenceCommits, _this.localImage, _this.listeners, _this.schema, true);
+        } else {
+          unseenServerCommits = _.drop(commits, oldServerHistoryLength - result.historyStart);
+          log.debug("Adding " + unseenServerCommits.length + " server commits from server image");
+          if (_this.localImage == null) {
+            _this.historyStart = result.historyStart;
+            _this.serverHistory = [];
+            _this.localHistory = [];
+            _this.serverImage = result.image;
+            _this.localImage = result.image;
+            _this.sentToServer = 0;
+            _this.unappliedOps = [];
+          }
+          convergenceCommits = _this.receiveFromServer.apply(_this, unseenServerCommits);
+          updateListeners(convergenceCommits, _this.localImage, _this.listeners, _this.schema, true);
+          _this.sentToServer = 0;
         }
       } else {
         commits = _.isArray(result) ? result.reverse() : [result];
         transformedCommits = _this.receiveFromServer.apply(_this, commits);
       }
-      log.debug("Server updated " + _this.uuid + " to " + (JSON.stringify(_this.serverImage)));
       return _this.trySendingNextCommit();
     });
     wsrouter.onOpen(function() {
-      return _this.requestState();
+      _this.requestState();
+      return _this.checkForTermination();
+    });
+    wsrouter.onClose(function() {
+      return _this.connection = OFFLINE;
     });
     wsrouter.onError(function() {
+      _this.connection = OFFLINE;
       return _this.sentToServer = 0;
     });
     return this;
   };
-  SOState.prototype.trySendingNextCommit = function() {
-    var commit;
-    if (this.sentToServer === 0 && this.localHistory.length > 0 && this.commitRoute.isOpen()) {
+  ZyncState.prototype.checkForTermination = function() {
+    var destructionCheck,
+      _this = this;
+    destructionCheck = function() {
+      if (_this.listeners.length === 0 && !_this.isLocal && _this.connection !== OFFLINE) {
+        _this.commitRoute.send("unsubscribe");
+        return _this.connection = OFFLINE;
+      }
+    };
+    return _.delay(destructionCheck, 2000);
+  };
+  ZyncState.prototype.trySendingNextCommit = function() {
+    var commit, composedOp, ops,
+      _this = this;
+    if (this.isLocal) {
+      return;
+    }
+    if (this.sentToServer === 0 && this.localHistory.length > 0 && this.commitRoute.isOpen() && this.connection === ONLINE) {
       commit = _.head(this.localHistory);
-      log.debug("Sending commit " + (commitToString(commit)) + " to server");
-      this.commitRoute.send(JSON.stringify(commit));
-      return this.sentToServer += 1;
+      ops = _.pluck(this.localHistory, 'op');
+      composedOp = normalizeJsonOp(_.foldl(ops, (function(b, a) {
+        return composeJsonOps(a, b, _this.schema);
+      })));
+      commit.op = composedOp;
+      if (commit.op === null) {
+        return this.localHistory = [];
+      } else {
+        this.localHistory = [commit];
+        log.debug("Sending commit " + (commitToString(commit)) + " to server");
+        this.commitRoute.send(JSON.stringify(commit));
+        return this.sentToServer += 1;
+      }
     }
   };
-  SOState.prototype.commit = function() {
-    var commit, composedOp, now, op, opToTranspose, ops, transposedOps, userId, vs, _i, _j, _len, _len1;
+  ZyncState.prototype.commit = function() {
+    var commit, composedOp, now, op, opToTranspose, ops, transposedOps, vs, _i, _j, _len, _len1,
+      _this = this;
     ops = 1 <= arguments.length ? __slice.call(arguments, 0) : [];
     ops = this.unappliedOps.concat(ops);
     if (ops.length === 0) {
@@ -811,10 +981,9 @@ SOFactory = function(getUser, wsrouter) {
       transposedOps.push(opToTranspose);
     }
     composedOp = normalizeJsonOp(_.foldl(transposedOps, (function(b, a) {
-      return composeJsonOps(a, b);
+      return composeJsonOps(a, b, _this.schema);
     })));
-    log.debug("Committing " + (opToString((op != null ? 'JsonOp' : void 0), composedOp)) + " to " + this.uuid);
-    userId = getUser();
+    log.debug("Committing " + (opToString((composedOp != null ? 'JsonOp' : void 0), composedOp)) + " to " + this.uuid);
     if (userId == null) {
       throw new Error('Attempt to commit operation without active user');
     }
@@ -827,28 +996,32 @@ SOFactory = function(getUser, wsrouter) {
       author: userId,
       created: now
     };
-    this.localImage = updateImage([composedOp], this.localImage);
-    updateListeners([commit], this.localImage, this.listeners, false);
+    this.localImage = updateImage([composedOp], this.localImage, this.schema);
+    updateListeners([commit], this.localImage, this.listeners, this.schema, false);
     this.localHistory.push(commit);
     return this.trySendingNextCommit();
   };
   listenerIdGen = 0;
-  SOState.prototype.onChange = function(fn) {
+  ZyncState.prototype.onChange = function(fn) {
     var id;
     id = listenerIdGen++;
-    return this.listeners.push([id, fn]);
+    if (!this.isLocal && this.connection === OFFLINE && this.commitRoute.isOpen()) {
+      this.requestState();
+    }
+    this.listeners.push([id, fn]);
+    return id;
   };
-  SOState.prototype.unsubscribe = function(listenerId) {
-    return this.listeners = this.listeners.filter(function(_arg) {
+  ZyncState.prototype.unsubscribe = function(listenerId) {
+    this.listeners = this.listeners.filter(function(_arg) {
       var fn, id;
       id = _arg[0], fn = _arg[1];
       return listenerId !== id;
     });
+    return this.checkForTermination();
   };
-  SOState.prototype.receiveFromServer = function() {
-    var commit, commits, localCommit, newLocalCommit, newLocalHistory, newLocalOp, op, ops, transformedCommit, transformedCommits, _i, _j, _len, _len1, _ref, _ref1;
+  ZyncState.prototype.receiveFromServer = function() {
+    var commit, commits, localCommit, newLocalCommit, newLocalHistory, newLocalOp, op, transformedCommit, transformedCommits, _i, _j, _len, _len1, _ref, _ref1;
     commits = 1 <= arguments.length ? __slice.call(arguments, 0) : [];
-    ops = _.pluck(commits, 'op');
     transformedCommits = [];
     for (_i = 0, _len = commits.length; _i < _len; _i++) {
       commit = commits[_i];
@@ -856,8 +1029,8 @@ SOFactory = function(getUser, wsrouter) {
         throw new Error("Received illegal commit from server " + (JSON.stringify(commit)) + ", history length " + (this.serverHistory.length + this.historyStart));
       }
       op = commit.op;
-      this.serverHistory.push(commit);
-      this.serverImage = updateImage([op], this.serverImage);
+      this.serverHistory = this.serverHistory.concat([commit]);
+      this.serverImage = updateImage([op], this.serverImage, this.schema);
       if (this.sentToServer > 0 && _.isEqual(op, this.localHistory[0].op)) {
         log.debug("Received confirmation of commit " + (commitToString(commit)) + " from server");
         this.sentToServer -= 1;
@@ -875,21 +1048,21 @@ SOFactory = function(getUser, wsrouter) {
           newLocalHistory.push(newLocalCommit);
         }
         this.localHistory = newLocalHistory;
-        this.localImage = updateImage(_.pluck(this.localHistory, 'op'), this.serverImage);
+        this.localImage = updateImage(_.pluck(this.localHistory, 'op'), this.serverImage, this.schema);
         transformedCommit = clone(commit);
         transformedCommit.op = op;
         transformedCommits.push(transformedCommit);
       }
     }
     if (transformedCommits.length > 0) {
-      updateListeners(transformedCommits, this.localImage, this.listeners, false);
+      updateListeners(transformedCommits, this.localImage, this.listeners, this.schema, false);
     }
     return transformedCommits;
   };
-  SOState.prototype.vs = function() {
+  ZyncState.prototype.vs = function() {
     return this.localHistory.length + this.serverHistory.length + this.historyStart;
   };
-  SOState.prototype.updatesSince = function(oldVs) {
+  ZyncState.prototype.updatesSince = function(oldVs) {
     var n;
     if (oldVs < this.historyStart) {
       throw new Error('Attempt to get updates from before history started');
@@ -956,7 +1129,9 @@ SOFactory = function(getUser, wsrouter) {
         validate();
         return this.path != null;
       };
-      listenerIdGen = 0;
+      this.isLoaded = function() {
+        return soState.localImage != null;
+      };
       stateListenerId = void 0;
       this.onChange = function(callback) {
         var id,
@@ -1053,7 +1228,9 @@ SOFactory = function(getUser, wsrouter) {
         subpath = 1 <= arguments.length ? __slice.call(arguments, 0) : [];
         return new Path(soState, this.path.concat(subpath));
       };
+      this.domain = soState.domain;
       this.uuid = soState.uuid;
+      this.pathId = this.uuid + "|" + this.path.join('.');
       this.vs = function() {
         return soState.vs();
       };
@@ -1076,11 +1253,25 @@ SOFactory = function(getUser, wsrouter) {
       return this.setOp('Replace').apply(null, x);
     };
 
+    Path.prototype.nullify = function() {
+      return this.createOp('Update', null);
+    };
+
     Path.prototype.setOp = function(opType) {
       var _this = this;
       return function(value) {
+        if (value == null) {
+          throw new Error('Please use nullify');
+        }
         return _this.createOp(opType, value);
       };
+    };
+
+    Path.prototype.incr = function(n) {
+      if (!(_.isNumber(n) && Math.floor(n) === n)) {
+        throw new Error("Non-integer " + n + " passed to incr");
+      }
+      return this.createOp('Incr', n);
     };
 
     Path.prototype.append = function(value) {
@@ -1097,6 +1288,17 @@ SOFactory = function(getUser, wsrouter) {
       return this.splice(index, nDelete, _.isArray(this.image()) ? [] : '');
     };
 
+    Path.prototype.removeOne = function(pred) {
+      var index, predFn;
+      predFn = _.isFunction(pred) ? pred : function(x) {
+        return x === pred;
+      };
+      index = _.findIndex(this.image(), predFn);
+      if (index >= 0) {
+        return this["delete"](index, 1);
+      }
+    };
+
     Path.prototype.splice = function(index, nDelete, value) {
       var l, obj, spliceOp;
       obj = this.image();
@@ -1104,7 +1306,7 @@ SOFactory = function(getUser, wsrouter) {
         throw new Error("Invalid splice at " + index + ", length " + nDelete + ", path " + this.path + ", on array " + (JSON.stringify(obj)));
       }
       if ((_.isString(obj) && !_.isString(value)) || (_.isArray(obj) && !_.isArray(value))) {
-        throw new Error("Attempt to illegally insert " + value + " at " + this.path + " into " + (JSON.stringify(obj)));
+        throw new Error("Attempt to illegally insert " + (JSON.stringify(value)) + " at " + this.path + " into " + (JSON.stringify(obj)));
       }
       spliceOp = [];
       if (index > 0) {
@@ -1121,8 +1323,28 @@ SOFactory = function(getUser, wsrouter) {
       return this.createOp('Splice', spliceOp);
     };
 
-    Path.prototype.bindToScope = function(scope, name) {
-      var applyChanges, safeApply;
+    Path.prototype.run = function(fn) {
+      var listenerId,
+        _this = this;
+      if (!_.isFunction(fn)) {
+        throw new Error('Call run with a callback function');
+      }
+      if (this.isLoaded()) {
+        return fn(this.image());
+      } else {
+        return listenerId = this.onChange(function(image) {
+          fn(image);
+          return _this.unsubscribe(listenerId);
+        });
+      }
+    };
+
+    Path.prototype.bindToScope = function(scope, name, transformFn) {
+      var applyChanges, listenerId, safeApply,
+        _this = this;
+      if (transformFn == null) {
+        transformFn = _.identity;
+      }
       safeApply = function(fn) {
         if (scope.$$phase || scope.$root.$$phase) {
           return fn();
@@ -1133,12 +1355,15 @@ SOFactory = function(getUser, wsrouter) {
       applyChanges = function(image) {
         return safeApply(function() {
           if (image != null) {
-            return scope[name] = clone(image);
+            return scope[name] = transformFn(clone(image));
           }
         });
       };
+      listenerId = this.onChange(applyChanges);
       applyChanges(this.image());
-      return this.onChange(applyChanges);
+      return scope.$on('$destroy', function() {
+        return _this.unsubscribe(listenerId);
+      });
     };
 
     return Path;
@@ -1146,7 +1371,7 @@ SOFactory = function(getUser, wsrouter) {
   })();
   Op = (function() {
     function Op(opType, op) {
-      var spliceOp, _i, _len, _ref, _ref1;
+      var spliceOp, _i, _len, _ref, _ref1, _ref2;
       this.opType = opType;
       this.op = op;
       this.isNull = false;
@@ -1164,9 +1389,9 @@ SOFactory = function(getUser, wsrouter) {
         }
         this.preLenSum = 0;
         this.postLenSum = 0;
-        _ref1 = op != null ? op : [];
-        for (_i = 0, _len = _ref1.length; _i < _len; _i++) {
-          spliceOp = _ref1[_i];
+        _ref2 = (_ref1 = this.op) != null ? _ref1 : [];
+        for (_i = 0, _len = _ref2.length; _i < _len; _i++) {
+          spliceOp = _ref2[_i];
           this.preLenSum += preLen(spliceOp);
           this.postLenSum += postLen(spliceOp);
         }
@@ -1248,28 +1473,65 @@ SOFactory = function(getUser, wsrouter) {
       return opToString(this.opType, this.op);
     };
 
+    Op.prototype.insertions = function() {
+      var el, inserted, spliceOp, _i, _j, _len, _len1, _ref, _ref1;
+      inserted = [];
+      if (this.opType === 'Splice') {
+        _ref = this.op;
+        for (_i = 0, _len = _ref.length; _i < _len; _i++) {
+          spliceOp = _ref[_i];
+          if (_.isObject(spliceOp) && (spliceOp.i != null)) {
+            _ref1 = spliceOp.i;
+            for (_j = 0, _len1 = _ref1.length; _j < _len1; _j++) {
+              el = _ref1[_j];
+              inserted.push(el);
+            }
+          }
+        }
+      }
+      return inserted;
+    };
+
     return Op;
 
   })();
   return {
-    create: function(domain) {
+    changeUser: function(newUserId) {
+      return userId = newUserId;
+    },
+    create: function(domain, uuid, isLocal) {
+      var isCreate;
       if (domain == null) {
         domain = 'data';
       }
-      return this.fetch(domain, generateUuid());
-    },
-    fetch: function(domain, uuid) {
-      if (state[uuid] == null) {
-        log.info("Fetching shared object " + domain + ": " + uuid);
-        state[uuid] = new SOState(domain, uuid);
+      if (uuid == null) {
+        uuid = void 0;
       }
-      return new Path(state[uuid], []);
+      if (isLocal == null) {
+        isLocal = false;
+      }
+      if (uuid == null) {
+        uuid = generateUuid();
+      }
+      return this.fetch(domain, uuid, isCreate = true, isLocal);
     },
-    isLoaded: function(uuid) {
-      return state[uuid] != null;
+    fetch: function(domain, uuid, isCreate, isLocal) {
+      var key;
+      if (isCreate == null) {
+        isCreate = false;
+      }
+      if (isLocal == null) {
+        isLocal = false;
+      }
+      key = domain + '/' + uuid;
+      if (state[key] == null) {
+        log.debug("Fetching zync object " + domain + ": " + uuid);
+        state[key] = new ZyncState(domain, uuid, isCreate, isLocal);
+      }
+      return new Path(state[key], []);
     },
-    stateOf: function(uuid) {
-      return clone(state[uuid]);
+    stateOf: function(domain, uuid) {
+      return clone(state[domain + '/' + uuid]);
     },
     fnsForUnitTests: {
       normalizeJsonOp: normalizeJsonOp,

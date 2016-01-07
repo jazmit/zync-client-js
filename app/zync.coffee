@@ -1,5 +1,5 @@
 
-# ************** SharedObject *****************
+# ************** Zync *****************
 #
 # Represents an object which is synchronized across clients via a server
 # objects can be mutated while offline, then synced later
@@ -7,21 +7,16 @@
 # Syntax:
 #
 # Create a new object, with a new uuid:
-# so = SharedObject.create('domain here')
+# so = Zync.create('domain here')
 #
 # .. or fetch an existing object from the server
-# so = SharedObject.fetch(uuid)
+# so = Zync.fetch(uuid)
 #
 # A plain immutable javascript object representation is available at
 # so.image()
 #
 # Set values on the object:
 # so.at('prop1').update('value1')
-#
-# OR
-#
-# so.addRawOp
-#   prop1: value1
 #
 # Operations on arrays and strings can be called as follows:
 # so.at('array_prop').insert index, ['new', 'items', 'for', 'array']
@@ -38,22 +33,31 @@
 # To be notified of changes (whether local or from the server)
 #
 # so.onChange (newImage, updateOperationsArray) ->
-#   .. process the new sharedobject here
+#   .. process the new zync object here
 #
 # To 'unlisten', call
 #
 # so.unListen(method)
-#
-# Shared objects are immutable.
 #
 # To return a sub-shared object, use 'at'
 # subobject  = so.at('a.b.c.d')
 # subobject2 = so.at('a', 'b', 'c').at('d')
 #
 #
-SOFactory = (getUser, wsrouter) ->
+ZyncFactory = (wsrouter, schemata) ->
 
     log = Logger.get("so")
+    subtype = Zync.Schema.subtype # TODO: remove global reference
+
+    # User Id for tagging commits
+    userId = undefined
+
+    deepFreeze = (obj) ->
+        if !_.isObject(obj) then return obj # Avoid safari errors
+        for key, val of obj
+            if obj.hasOwnProperty(key) and _.isObject(val)
+                deepFreeze(val)
+        Object.freeze(obj)
 
     generateUuid = ->
         # Adapted from http://stackoverflow.com/a/2117523/469981
@@ -67,20 +71,26 @@ SOFactory = (getUser, wsrouter) ->
         else
             JSON.parse(JSON.stringify obj)
 
+
     # Updates the given image and notifies listeners
-    updateImage = (ops, target) ->
+    updateImage = (ops, target, schema) ->
         for op in ops
             opType = if !op? then undefined else 'JsonOp'
-            target = apply(target, opType, op)
+            target = apply(target, opType, op, schema)
         target
 
-    updateListeners = (commits, target, listeners, isInitialState) ->
+    updateListeners = (commits, target, listeners, schema, isInitialState) ->
         ops = _.pluck(commits, 'op')
         op = if ops.length > 0
-                 new Op('JsonOp', _.foldl(ops, composeJsonOps))
+                 # Make an op which represents the entire update
+                 new Op('JsonOp', _.foldl(ops, (a, b) -> composeJsonOps(b, a, schema)))
              else if isInitialState
+                 # We re-initialized the object.  Simulate this as an
+                 # update for clients that use the op information
+                 # by replacing the entire object
                  new Op('Update', target)
              else
+                 # TODO: WHY IS THIS NEEDED?
                  undefined
         listener(target, op) for [id, listener] in listeners
 
@@ -137,7 +147,7 @@ SOFactory = (getUser, wsrouter) ->
         else if isModify(op) then 1
         else
             throw new Error "Unknown array op #{spliceOpToString op}"
-    
+
     # Length of the slice produced by this array operation
     postLen = (op) ->
         if _.isNumber(op) then op
@@ -176,9 +186,9 @@ SOFactory = (getUser, wsrouter) ->
         if _.isNumber(spliceOp)
             spliceOp.toString()
         else if _.isObject(spliceOp)
-            if spliceOp.d? and !spliceOp.i?
+            if spliceOp.d > 0 and spliceOp.i?.length == 0
                 "-#{spliceOp.d}"
-            else if spliceOp.i? and !spliceOp.d?
+            else if spliceOp.i?.length > 0 and spliceOp.d == 0
                 "+#{JSON.stringify spliceOp.i}"
             else if spliceOp.i? and spliceOp.d?
                 "-#{spliceOp.d}/+#{JSON.stringify spliceOp.i}"
@@ -192,7 +202,8 @@ SOFactory = (getUser, wsrouter) ->
         else
             throw new Error "Cannot convert #{JSON.stringify spliceOp} to string"
 
-    # Convert an op to a compact string representation for debugging
+
+    # Convert an op to a terse string representation, helpful for debugging
     opToString = (opType, op) ->
       if !opType? then 'Id'
       else switch opType
@@ -203,22 +214,25 @@ SOFactory = (getUser, wsrouter) ->
               kvs =
                   for k, subOp of op
                       [subOpType, subOpName] = opOf(k)
-                      "#{subOpName}#{opToString(subOpType, subOp)}" 
+                      "#{subOpName}#{opToString(subOpType, subOp)}"
               "{#{kvs.join(", ")}}"
           when 'Update'
               "=#{JSON.stringify op}"
           when 'Replace'
               "==#{JSON.stringify op}"
+          when 'Incr'
+              "+=#{op}"
           else
               throw new Error "Cannot convert #{JSON.stringify op} to string"
 
-    commitToString = (commit) ->
-        "|#{commit.vs}: #{opToString 'JsonOp', commit.op}|"
 
-        
+    commitToString = (commit) ->
+        "|#{commit.vs}: #{opToString (if commit.op? then 'JsonOp' else undefined), commit.op}|"
+
+
 
     # Apply splice operation to a string or array
-    applyArrayOp = (opList, spliceTarget) ->
+    applyArrayOp = (opList, spliceTarget, schema) ->
         # Create a variable to accumulate the result
         result =
             if _.isString spliceTarget then ''
@@ -228,7 +242,7 @@ SOFactory = (getUser, wsrouter) ->
         # n is the index into the spliceTarget
         n = 0
         for arrOp in opList
-            # Take a slice of spliceTarget, apply the 
+            # Take a slice of spliceTarget, apply the
             # operation to it, then accumulate the result
             l        = preLen(arrOp)
             slice    = spliceTarget.slice(n, n+l)
@@ -239,7 +253,7 @@ SOFactory = (getUser, wsrouter) ->
                     arrOp.i  # Replace or Insert
                 else if isModify(arrOp)
                     [opType, opValue]  = parseModify(arrOp)
-                    slice.map( (el) => apply(el, opType, opValue) )
+                    slice.map( (el) => apply(el, opType, opValue, subtype(schema) ))
             if _.isString result then result += newSlice
             else result.push newSlice...
             n += l
@@ -248,7 +262,7 @@ SOFactory = (getUser, wsrouter) ->
         unless _.isString result then Object.freeze result else result
 
 
-    apply = (target, opType, opValue) ->
+    apply = (target, opType, opValue, schema) ->
         if !opType?
             # Identity operation
             return target
@@ -256,18 +270,27 @@ SOFactory = (getUser, wsrouter) ->
             when 'Update', 'Replace'
                 # Simple 'Set' operation
                 opValue
+            when 'Incr'
+                unless _.isNumber(target)
+                    throw new Error("Increment on #{target}")
+                unless _.isNumber(opValue)
+                    throw new Error("Increment with value #{opValue}")
+                target + opValue
             when 'Splice'
                 # Splice on a string or array
-                applyArrayOp(opValue, target)
+                applyArrayOp(opValue, target, schema)
             when 'JsonOp'
-                applyJsonOp(target, opValue)
+                applyJsonOp(target, opValue, schema)
             else
                 throw new Error "Unknown opType #{opType}"
 
 
     # Apply an operation to an object, returning a new object
     # FUTURE: make this prettier/more efficient with Zippers?
-    applyJsonOp = (target, opObject) ->
+    applyJsonOp = (target, opObject, schema) ->
+
+        unless schema.name in ['dict', 'object', 'any']
+            throw new Error "Cannot apply Json Op #{JSON.stringify opObject} to schema #{JSON.stringify schema}"
 
         unless _.isObject(target) and _.isObject(opObject) and !_.isArray(target) and !_.isArray(opObject)
             throw new Error "Undefined op (#{JSON.stringify opObject}) or target (#{JSON.stringify target})"
@@ -289,10 +312,10 @@ SOFactory = (getUser, wsrouter) ->
                 if key of ops
                     # There is an operation which needs to be applied here
                     [opType, opValue] = ops[key]
-                    apply(value, opType, opValue)
+                    apply(value, opType, opValue, subtype(schema, key))
                 else if key in opsAtDepth
                     # Apply sub-op to sub-object
-                    applyJsonOp(target[key], opObject[key])
+                    applyJsonOp(target[key], opObject[key], subtype(schema, key))
                 else
                     # Operation doesn't act here
                     # copy the already immutable object across
@@ -312,7 +335,7 @@ SOFactory = (getUser, wsrouter) ->
 
     normalizeJsonOp = (opObject) ->
 
-        # Allow commit(prop: value) instead of commit(prop: SharedObject.update(value))
+        # Allow commit(prop: value) instead of commit(prop: Zync.update(value))
         newObject = {}
         for key, value of opObject
             [opType, prop] = opOf(key)
@@ -322,7 +345,7 @@ SOFactory = (getUser, wsrouter) ->
                         if isKeep(a) and isKeep(b)
                             [a + b]
                         else if isChange(a) and isChange(b)
-                            newI = 
+                            newI =
                                 if _.isString(a.i) and _.isString(b.i)
                                     a.i + b.i
                                 else if _.isArray(a.i) and _.isArray(b.i)
@@ -360,6 +383,12 @@ SOFactory = (getUser, wsrouter) ->
                 when 'JsonOp'
                     # Just recurse
                     normalizeJsonOp(value)
+                when 'Incr'
+                    # Normalize away increment by 0
+                    if value == 0
+                        null
+                    else
+                        value
                 else
                     value
 
@@ -433,14 +462,14 @@ SOFactory = (getUser, wsrouter) ->
                 resAs.push(postLen(nextB))
                 continue
             if nextB == NO_MORE_ELEMENTS
-                if preLen(nextA) > 0 
+                if preLen(nextA) > 0
                     throw new Error "First operand of splice transpose #{opToString 'Splice', a}, #{opToString 'Splice', b} too long"
                 resAs.push(nextA)
                 # Certain that postLen(nextA) > 0
                 resBs.push(postLen(nextA))
                 continue
 
-            # Split the operations into matching chunks and 
+            # Split the operations into matching chunks and
             # put the remainder back into the input
             [la, lb] = [preLen(nextA), preLen(nextB)]
             [splitA, splitB] =
@@ -496,12 +525,14 @@ SOFactory = (getUser, wsrouter) ->
         else if (aType == 'JsonOp') and (bType == 'JsonOp')
             [jsA, jsB] = transposeJsonOp(a, b)
             ['JsonOp', jsA, 'JsonOp', jsB]
+        else if (aType == 'Incr') and (bType == 'Incr')
+            ['Incr', a, 'Incr', b]
         else
             throw new Error "Unknown op types #{aType}, #{bType}"
 
     # Transpose two commands, each of which may contain many operations
     # a: The first argument is the unconfirmed client operation
-    # b: The second argument is the confirmed server operation and has 
+    # b: The second argument is the confirmed server operation and has
     #    priority where unresolvable conflicts occur
     transposeJsonOp = (a, b) ->
         newA = {}
@@ -548,7 +579,7 @@ SOFactory = (getUser, wsrouter) ->
     # thus, still pointing to 'a'
     transposePath = (a, path) ->
         # Empty paths cannot be transformed
-        # If there are operations deeper than this path,
+        # If operations are all deeper than this path,
         # then the path stays the same
         if !path? or path.length == 0 then return path
         pathHead = _.head(path)
@@ -618,7 +649,7 @@ SOFactory = (getUser, wsrouter) ->
     # Compose single splices of identical length as a . b
     # ie: b is applied first
     # eg: {Update$$m: 3}, {i: [5], d: 0}
-    composeSplice = (a, b) ->
+    composeSplice = (a, b, schema) ->
         unless postLen(b) == preLen(a) and postLen(b) > 0
             throw "Illegal compose of splices #{spliceOpToString a} and #{spliceOpToString b}"
         if isKeep(a)
@@ -633,12 +664,12 @@ SOFactory = (getUser, wsrouter) ->
         else if isChange(b)
             # An insert in a which is modified in b
             # Must apply a to contents of b
-            { d: b.d, i: applyArrayOp([a], b.i) }
+            { d: b.d, i: applyArrayOp([a], b.i, schema) }
         else if isModify(a) and isModify(b)
             # Modify ops, recurse
             [opTypeA, opA] = parseModify(a)
             [opTypeB, opB] = parseModify(b)
-            [newOpType, newOp] = compose(opTypeA, opA, opTypeB, opB)
+            [newOpType, newOp] = compose(opTypeA, opA, opTypeB, opB, subtype schema)
             addOpToObject({}, 'm', newOpType, newOp)
         else
             throw new Error "Cannot compose #{JSON.stringify a} and #{JSON.stringify b}"
@@ -646,19 +677,19 @@ SOFactory = (getUser, wsrouter) ->
     # Composes splice operations of identical length on a whole array a.b
     # ie, b is applied before a
     # eg: [1, {i: 'Hi'}, 2] with [2, {d: 1}, 1]
-    composeSplices = (a, b) ->
+    composeSplices = (a, b, schema) ->
         # If a and b are Nil, we are finished
         if a.length == 0 and b.length == 0 then return []
 
         # Check for 0-postLength operations in a, which can be passed through
         a0 = _.head(a)
         if a0? and preLen(a0) == 0
-            return [a0].concat composeSplices(_.tail(a), b)
+            return [a0].concat composeSplices(_.tail(a), b, schema)
 
         # Check for 0-preLength operations in b, which can be passed through
         b0 = _.head(b)
         if b0? and postLen(b0) == 0
-            return [b0].concat composeSplices(a, _.tail(b))
+            return [b0].concat composeSplices(a, _.tail(b), schema)
 
         if b.length == 0 and a.length > 0 or a.length == 0 and b.length > 0
             throw new Error "Composed slices of unequal length #{JSON.stringify a} and #{JSON.stringify b}"
@@ -670,17 +701,17 @@ SOFactory = (getUser, wsrouter) ->
         if la > lb
             # Splice up the first op in a, compose the matching slices and recurse
             [a0, a1] = opSplit(a0, lb)
-            [composeSplice(a0, b0)].concat composeSplices([a1].concat(remA), remB)
+            [composeSplice(a0, b0, schema)].concat composeSplices([a1].concat(remA), remB, schema)
         else if lb > la
             # Slice up the first op in b, compose the matching slices and recurse
             [b0, b1] = opPostSplit(b0, la)
-            [composeSplice(a0, b0)].concat composeSplices(remA, [b1].concat(remB))
+            [composeSplice(a0, b0, schema)].concat composeSplices(remA, [b1].concat(remB), schema)
         else # la == lb
             # No slicing needed, just compose the matching slices and recurse
-            [composeSplice(a0, b0)].concat composeSplices(remA, remB)
+            [composeSplice(a0, b0, schema)].concat composeSplices(remA, remB, schema)
 
     # Compose two operation a and b as a.b, ie: b is applied first
-    compose = (aType, a, bType, b) ->
+    compose = (aType, a, bType, b, schema) ->
         if aType == 'Update' or aType == 'Replace'
             # The update on the second op wins
             [aType, a]
@@ -692,15 +723,17 @@ SOFactory = (getUser, wsrouter) ->
             [aType, a]
         else if bType == 'Update' or bType == 'Replace'
             # b updates the object and a operated on the updated value
-            [bType, apply(b, aType, a)]
+            [bType, apply(b, aType, a, schema)]
         else if aType == 'JsonOp' and bType == 'JsonOp'
-            ['JsonOp', composeJsonOps(a, b)]
+            ['JsonOp', composeJsonOps(a, b, schema)]
         else if aType == 'Splice' and bType == 'Splice'
-            ['Splice', composeSplices(a, b)]
+            ['Splice', composeSplices(a, b, schema)]
+        else if aType == 'Incr' and bType == 'Incr'
+            ['Incr', a + b]
         else
             throw new Error "Illegal composition of #{aType} and #{bType}"
 
-    composeJsonOps = (a, b) ->
+    composeJsonOps = (a, b, schema) ->
         # Make a record of all ops on a and b
         result = {}
         dictA = {}
@@ -718,7 +751,7 @@ SOFactory = (getUser, wsrouter) ->
             [opTypeB, b_] = dictB[key] ? [key, undefined, undefined]
             if a_? and b_?
                 # Recurse as both properties are operated on
-                [newOpType, newOpValue] = compose(opTypeA, a_, opTypeB, b_)
+                [newOpType, newOpValue] = compose(opTypeA, a_, opTypeB, b_, subtype(schema, key))
                 addOpToObject(result, key, newOpType, newOpValue)
             else if a_?
                 # Only a is affected, pass through
@@ -728,47 +761,58 @@ SOFactory = (getUser, wsrouter) ->
                 addOpToObject(result, key, opTypeB, b_)
         result
 
-    # Define some global sharedobject state which
+    # Define some global zync object state which
     # is necessary for communicating with the server and hiding
-    # mutable state for individual sharedobjects
+    # mutable state for individual zync object
     # This is a map of UUID to state
     state = {}
 
     # Set up server communications
     routes = {}
 
-    #log.setLevel(Logger.DEBUG)
+    # Constants for connection state
+    OFFLINE = 'offline'
+    REQUESTING_STATE = 'requesting state'
+    ONLINE = 'online'
 
-    # Class representing the state of a shared object
-    SOState = (@domain, @uuid) ->
+    # Class representing the state of a zync object
+    ZyncState = (@domain, @uuid, isCreate, @isLocal) ->
+        unless schemata[@domain]?
+            throw new Error "Domain #{@domain} not found"
         @unappliedOps  = [] # Array of operations yet to be appended
         @localHistory  = [] # Mutable array
         @historyStart  = 0  # History may not extend back to object creation
-        @localImage    = {} # Immutable snapshot
+        @schema        = schemata[@domain].schema
         @sentToServer  = 0  # Number of commits from localHistory
-        @serverHistory = [] # Mutable array
-        @serverImage   = @localImage # Immutable snapshot
-        @listeners     = [] # Mutable array
+        @serverHistory = []
+
+        # We know the server image will be initialized from the schema
+        # Safari throws an error for deepFreeze(undefined), so first check that we have an object
+        @serverImage = Zync.Schema.instantiate(@schema)
+        @localImage = if isCreate then @serverImage else undefined
+
+        @listeners       = [] # Mutable array
+        @connection = OFFLINE
 
         @requestState = =>
-            # When the websocket opens or re-opens, we subscribe to the shared object
+            @connection = REQUESTING_STATE
+            # When the websocket opens or re-opens, we subscribe to the zync object
             # Only when we receive the state update do we attempt to send new commits
             unless routes[@domain]?
                 # Add a route for this domain
+                # This is used to create new Zync objects on this domain
                 routes[@domain] = wsrouter.addRoute(@domain, ->)
 
             # TODO: include history start request in send
-            routes[@domain].send(uuid) # Subscribe to the shared object
+            routes[@domain].send(@uuid) # Subscribe to the zync object
 
-        @commitRoute = wsrouter.addRoute @uuid, (msg) =>
+        # Local objects do not communicate with the server
+        if @isLocal then return this
+
+        @commitRoute = wsrouter.addRoute "#{@domain}/#{@uuid}", (msg) =>
                 # Receive a message from the server
                 result = undefined
-                deepFreeze = (obj) ->
-                    for key, val of obj
-                        if obj.hasOwnProperty(key) and _.isObject(val)
-                            deepFreeze(val)
-                    Object.freeze(obj)
-                try 
+                try
                     result = deepFreeze JSON.parse(msg)
                 catch e
                     log.error "Error from server: #{msg}"
@@ -776,72 +820,130 @@ SOFactory = (getUser, wsrouter) ->
                     #@requestState()
                     return
                 if result.image?
-                    log.debug "Received image #{JSON.stringify result} for #{@uuid}"
+                    log.debug "Received image #{JSON.stringify result.image} for #{@domain}/#{@uuid}"
+                    @connection = ONLINE # We know the server accepts this object
                     # Initial SO state sent from server
                     # {historyStart: Number, history: [Commit], state: JSON}
 
                     # Now we need to reintegrate local commits
-                    #
                     oldServerHistoryLength = @historyStart + @serverHistory.length
                     newServerHistoryLength = result.history.length + result.historyStart
+                    commits = (obj for obj in result.history).reverse()
 
                     if oldServerHistoryLength > newServerHistoryLength
-                        # Something has gone horribly wrong
-                        throw new Error 'Fatal: server sent shorter history than already confirmed'
+                        # Something has gone horribly wrong on the server, we need to reset this SO state
+                        log.warn 'Server data loss: server sent shorter history than already confirmed'
+                        @localHistory = []
+                        @serverHistory = []
+                        @historyStart  = result.historyStart
+                        @unappliedOps  = []
+                        @sentToServer  = 0
+                        @serverImage   = @localImage = result.image
+                        transformedCommits = @receiveFromServer(commits...)
+                        updateListeners(transformedCommits, @localImage, @listeners, @schema, true)
 
                     if result.historyStart > oldServerHistoryLength
-                        log.warn "Dropped all local history because server history is too short"
-                        # Server hasn't sent enough history to transform local commits.
-                        # We must abandon all local commits
-                        # FUTURE: consider re-requesting history instead?
+                        if oldServerHistoryLength > 0
+                            # Server hasn't sent enough history to transform local commits.
+                            # We must abandon all local commits
+                            # FUTURE: consider re-requesting history instead?
+                            log.warn "Dropped all local history for #{@uuid} because server history is too short"
                         @localHistory  = []
                         @serverHistory = []
                         @historyStart  = result.historyStart
                         @unappliedOps  = []
                         @sentToServer  = 0
                         @serverImage   = @localImage = result.image
-                        commits = result.history.reverse()
                         transformedCommits = @receiveFromServer(commits...)
-                        updateListeners(transformedCommits, @localImage, @listeners, true)
+                        updateListeners(convergenceCommits, @localImage, @listeners, @schema, true)
                     else
                         # We can transform local history against new commits supplied by the server
-                        newServerCommits = _.drop(result.history, oldServerHistoryLength - result.historyStart)
-                        log.debug "Adding #{newServerCommits.length} server commits from server image"
+                        # This is the mainline
+                        unseenServerCommits = _.drop(commits, oldServerHistoryLength - result.historyStart)
+                        log.debug "Adding #{unseenServerCommits.length} server commits from server image"
 
-                        # Copy across values from server
-                        transformedCommits = @receiveFromServer(newServerCommits...)
+                        # Received an image update when already initialized
+                        # Add the new server commits to our history, and calculate corrective
+                        # commits that bring our local image in line with the server
+                        if !@localImage?
+                            # Zync object initialized by server
+                            @historyStart  = result.historyStart
+                            @serverHistory = []
+                            @localHistory  = []
+                            @serverImage   = result.image
+                            @localImage    = result.image
+                            @sentToServer  = 0
+                            @unappliedOps = []
+                        convergenceCommits = @receiveFromServer(unseenServerCommits...)
+                        updateListeners(convergenceCommits, @localImage, @listeners, @schema, true)
 
-                        # If commits we sent to the server previously aren't in the image
-                        # they must never have been received.
                         @sentToServer = 0
-                        updateListeners(transformedCommits, @localImage, @listeners, true)
-                    # - First, remove any local commits that have been applied on the server
 
                 else
+                    # No image in result from server
                     # Array of commits or one commit sent by server
                     commits = if _.isArray(result) then result.reverse() else [result]
                     transformedCommits = @receiveFromServer(commits...)
-                log.debug "Server updated #{@uuid} to #{JSON.stringify @serverImage}"
-                @trySendingNextCommit()
+                #log.debug "Server updated #{@uuid} to #{JSON.stringify @serverImage}"
+                @trySendingNextCommit() # Now we've connected we can start updating the server
 
-        wsrouter.onOpen => @requestState()
+        wsrouter.onOpen =>
+            @requestState() # Re-request the state every time the websocket opens
+            # Immediately start a destruction check
+            # This ensures we clean up if someone starts an object and never
+            # calls onChange
+            @checkForTermination()
+
+
+        wsrouter.onClose =>
+            @connection = OFFLINE
 
         wsrouter.onError =>
             # Assume all commits already sent never reached the server
             # the server will de-duplicate
+            @connection = OFFLINE
             @sentToServer = 0
 
         this
 
 
-    SOState :: trySendingNextCommit = ->
-        if @sentToServer == 0 and @localHistory.length > 0 and @commitRoute.isOpen()
-            commit = _.head(@localHistory)
-            log.debug "Sending commit #{commitToString commit} to server"
-            @commitRoute.send(JSON.stringify commit)
-            @sentToServer += 1
+    ZyncState :: checkForTermination = ->
+        destructionCheck = =>
+            if @listeners.length == 0 and !@isLocal and @connection != OFFLINE
+                @commitRoute.send "unsubscribe"
+                @connection = OFFLINE
 
-    SOState :: commit = (ops...) ->
+        # Delay the destruction check to account for
+        # quick subscribe / unsubscribes as the object is
+        # being set up
+        _.delay(destructionCheck, 2000)
+
+    ZyncState :: trySendingNextCommit = ->
+        if @isLocal then return
+        if @sentToServer == 0 and
+                @localHistory.length > 0 and
+                @commitRoute.isOpen() and
+                @connection == ONLINE
+            commit = _.head(@localHistory)
+
+
+            # Bunch all localhistory together into one op.  In future, get the server to accept several ops?
+            ops = _.pluck(@localHistory, 'op')
+            composedOp = normalizeJsonOp _.foldl(ops, ((b, a) => composeJsonOps(a, b, @schema)))
+            commit.op = composedOp
+            if commit.op == null
+                # Don't bother sending the identity operation to the server
+                # This is probably occurred because the server or another
+                # client did the same operations as us
+                @localHistory = []
+            else
+                @localHistory = [commit]
+
+                log.debug "Sending commit #{commitToString commit} to server"
+                @commitRoute.send(JSON.stringify commit)
+                @sentToServer += 1
+
+    ZyncState :: commit = (ops...) ->
 
         # The first op applied is at the beginning of ops
         ops = @unappliedOps.concat(ops)
@@ -857,11 +959,10 @@ SOFactory = (getUser, wsrouter) ->
             transposedOps.push opToTranspose
 
         # Must reverse the arguments of compose, which takes the last applied op last
-        composedOp = normalizeJsonOp _.foldl(transposedOps, ((b, a) -> composeJsonOps(a, b)))
-        log.debug "Committing #{opToString (if op? then 'JsonOp' else undefined), composedOp} to #{@uuid}"
+        composedOp = normalizeJsonOp _.foldl(transposedOps, ((b, a) => composeJsonOps(a, b, @schema)))
+        log.debug "Committing #{opToString (if composedOp? then 'JsonOp' else undefined), composedOp} to #{@uuid}"
 
         # Create a commit for each op
-        userId = getUser()
         if !userId?
             throw new Error 'Attempt to commit operation without active user'
         now = Date.now() # Milliseconds since 1970 UTC
@@ -873,8 +974,8 @@ SOFactory = (getUser, wsrouter) ->
             author: userId
             created: now
 
-        @localImage = updateImage([composedOp], @localImage)
-        updateListeners([commit], @localImage, @listeners, false)
+        @localImage = updateImage([composedOp], @localImage, @schema)
+        updateListeners([commit], @localImage, @listeners, @schema, false)
         @localHistory.push commit
 
         # If we got here with no errors, try sending the operations to the server
@@ -882,20 +983,25 @@ SOFactory = (getUser, wsrouter) ->
 
     listenerIdGen = 0
 
-    SOState :: onChange = (fn) ->
+    ZyncState :: onChange = (fn) ->
         id = listenerIdGen++
+        if !@isLocal and @connection == OFFLINE and @commitRoute.isOpen()
+            @requestState()
         @listeners.push [id, fn]
+        id
 
-    SOState :: unsubscribe = (listenerId) ->
+    ZyncState :: unsubscribe = (listenerId) ->
         @listeners = @listeners.filter ([id, fn]) ->
             listenerId != id
+
+        # Defer the final server unsubscribe
+        @checkForTermination()
+
 
     # Integrate a commit received from the server, and adjust
     # local history to match.
     # Returns the server operation transformed by local history
-    SOState :: receiveFromServer = (commits...) ->
-
-        ops = _.pluck(commits, 'op')
+    ZyncState :: receiveFromServer = (commits...) ->
 
         # Make sure all ops are immutable
         transformedCommits = []
@@ -908,9 +1014,10 @@ SOFactory = (getUser, wsrouter) ->
                 throw new Error "Received illegal commit from server #{JSON.stringify commit}, history length #{@serverHistory.length + @historyStart}"
 
             op = commit.op
+
             # Update server history
-            @serverHistory.push(commit)
-            @serverImage = updateImage([op], @serverImage)
+            @serverHistory = @serverHistory.concat [commit]
+            @serverImage = updateImage([op], @serverImage, @schema)
             # If op is exactly what we sent to the server
             # we are home and dry
             if @sentToServer > 0 and _.isEqual(op, @localHistory[0].op)
@@ -934,20 +1041,20 @@ SOFactory = (getUser, wsrouter) ->
                     newLocalHistory.push newLocalCommit
                 @localHistory = newLocalHistory
                 # Regenerate local image from server image
-                @localImage   = updateImage(_.pluck(@localHistory, 'op'), @serverImage)
+                @localImage   = updateImage(_.pluck(@localHistory, 'op'), @serverImage, @schema)
                 transformedCommit = clone commit
                 transformedCommit.op = op
                 transformedCommits.push transformedCommit
 
         if transformedCommits.length > 0
-            updateListeners(transformedCommits, @localImage, @listeners, false)
+            updateListeners(transformedCommits, @localImage, @listeners, @schema, false)
 
         transformedCommits
 
-    SOState :: vs = ->
+    ZyncState :: vs = ->
         @localHistory.length + @serverHistory.length + @historyStart
 
-    SOState :: updatesSince = (oldVs) ->
+    ZyncState :: updatesSince = (oldVs) ->
         if oldVs < @historyStart
             # TODO: load history from server here?
             throw new Error 'Attempt to get updates from before history started'
@@ -960,11 +1067,11 @@ SOFactory = (getUser, wsrouter) ->
             _.drop(@localHistory, @localHistory.length - n)
 
 
-    # An API for applying operations to part of a sharedobject
+    # An API for applying operations to part of a zync object
     class Path
 
         # Set up private state
-        # soState, 
+        # soState,
         constructor: (soState, @path) ->
 
             # Check path validity
@@ -1006,7 +1113,9 @@ SOFactory = (getUser, wsrouter) ->
                 validate()
                 @path?
 
-            listenerIdGen = 0
+            @isLoaded = ->
+                soState.localImage?
+
             stateListenerId = undefined
 
             @onChange = (callback) ->
@@ -1016,7 +1125,7 @@ SOFactory = (getUser, wsrouter) ->
                         for pathEl in @path
                             op = op.at(pathEl)
                             if !op? then return
-                        
+
                         image = @image()
                         toRemove = []
                         for [id, callback] in @listeners
@@ -1033,7 +1142,7 @@ SOFactory = (getUser, wsrouter) ->
 
             @unsubscribe = (idToUnsubscribe) ->
                 @listeners = @listeners.filter ([id, callback]) ->
-                    id != idToUnsubscribe 
+                    id != idToUnsubscribe
                 if @listeners.length == 0 and stateListenerId?
                     soState.unsubscribe(stateListenerId)
                 return this
@@ -1073,10 +1182,14 @@ SOFactory = (getUser, wsrouter) ->
             @at = (subpath...) ->
                 new Path(soState, @path.concat subpath)
 
+            @domain = soState.domain
             @uuid = soState.uuid
+
+            @pathId = @uuid + "|" + @path.join('.')
 
             @vs = -> soState.vs()
 
+        # FOR UNIT TESTING ONLY
         commitRawOp: (op) ->
             @addRawOp(op)
             @commit()
@@ -1084,7 +1197,16 @@ SOFactory = (getUser, wsrouter) ->
         # Define the convenience methods for creating ops
         update:  (x...) -> @setOp('Update')(x...)
         replace: (x...) -> @setOp('Replace')(x...)
-        setOp:   (opType) -> (value) => @createOp(opType, value)
+        nullify: -> @createOp('Update', null)
+        setOp:   (opType) -> (value) =>
+            unless value?
+                throw new Error 'Please use nullify'
+            @createOp(opType, value)
+
+        incr: (n) ->
+            unless _.isNumber(n) and Math.floor(n) == n
+                throw new Error "Non-integer #{n} passed to incr"
+            @createOp('Incr', n)
 
         # Define convenience methods for arrays and strings
         append: (value) ->
@@ -1094,6 +1216,15 @@ SOFactory = (getUser, wsrouter) ->
             @splice(index, 0, value)
         delete: (index, nDelete) ->
             @splice(index, nDelete, if _.isArray(@image()) then [] else '')
+        removeOne: (pred) ->
+            predFn =
+                if _.isFunction(pred)
+                    pred
+                else
+                    (x) -> x == pred
+            index = _.findIndex(@image(), predFn)
+            if index >= 0
+                @delete(index, 1)
         splice: (index, nDelete, value) ->
 
             # Check parameters are legal
@@ -1101,7 +1232,7 @@ SOFactory = (getUser, wsrouter) ->
             unless obj? and _.isNumber(index) and 0 <= index <= obj.length - nDelete
                 throw new Error "Invalid splice at #{index}, length #{nDelete}, path #{@path}, on array #{JSON.stringify obj}"
             if (_.isString(obj) and !_.isString(value)) or (_.isArray(obj) and !_.isArray(value))
-                throw new Error "Attempt to illegally insert #{value} at #{@path} into #{JSON.stringify obj}"
+                throw new Error "Attempt to illegally insert #{JSON.stringify value} at #{@path} into #{JSON.stringify obj}"
 
             # Create the splice operation
             spliceOp = []
@@ -1115,15 +1246,39 @@ SOFactory = (getUser, wsrouter) ->
 
             @createOp('Splice', spliceOp)
 
+        # Utility method which ensures the object is loaded
+        # before passing the image
+        run: (fn) ->
+            unless _.isFunction(fn)
+                throw new Error 'Call run with a callback function'
+            if @isLoaded()
+                fn(@image())
+            else
+                listenerId = @onChange (image) =>
+                    fn(image)
+                    @unsubscribe(listenerId)
+
         # Utility methods for use with Angular
-        bindToScope: (scope, name) ->
+        bindToScope: (scope, name, transformFn = _.identity) ->
+            # Trigger scope digest if appropriate
             safeApply = (fn) ->
                 if scope.$$phase || scope.$root.$$phase then fn()
                 else scope.$apply fn
+
+            # Copy the image to the scope
             applyChanges = (image) -> safeApply ->
-                if image? then scope[name] = clone(image)
+                if image? then scope[name] = transformFn(clone(image))
+
+            # Listen to changes
+            listenerId = @onChange applyChanges
+
+            # Copy the image straight away if it exists
             applyChanges(@image())
-            @onChange applyChanges
+
+            # Unsubscribe when scope is destroyed
+            scope.$on '$destroy', =>
+                @unsubscribe(listenerId)
+
 
 
     # API for querying ops
@@ -1142,7 +1297,7 @@ SOFactory = (getUser, wsrouter) ->
                 unless _.isArray(@op) then throw new Error 'Illegal Splice'
                 @preLenSum  = 0
                 @postLenSum = 0
-                for spliceOp in op ? []
+                for spliceOp in @op ? []
                     @preLenSum  += preLen(spliceOp)
                     @postLenSum += postLen(spliceOp)
             else
@@ -1196,27 +1351,40 @@ SOFactory = (getUser, wsrouter) ->
         toString: ->
             opToString(@opType, @op)
 
+        insertions: ->
+            inserted = []
+            if @opType == 'Splice'
+                for spliceOp in @op
+                    if _.isObject(spliceOp) and spliceOp.i?
+                        inserted.push el for el in spliceOp.i
+            return inserted
+
 
     # Return static method API
     {
-        create: (domain = 'data') ->
-            @fetch(domain, generateUuid())
+        # On log in / out
+        changeUser: (newUserId) ->
+            userId = newUserId
 
-        fetch: (domain, uuid) ->
-            # Fetch the shared object matching this uuid from the server unless $uuidUtils.test(uuid) throw 'Illegal UUID'
+        create: (domain = 'data',
+                 uuid   = undefined
+                 isLocal = false) ->
+            uuid ?= generateUuid()
+            @fetch(domain, uuid, isCreate = true, isLocal)
+
+        fetch: (domain, uuid, isCreate = false, isLocal = false) ->
+            # Fetch the zync object matching this uuid from the server unless $uuidUtils.test(uuid) throw 'Illegal UUID'
             # Unless the so is already here,
-            # create a new shared object, and ask the server for updates
-            unless state[uuid]?
-                log.info("Fetching shared object #{domain}: #{uuid}")
-                state[uuid] = new SOState(domain, uuid)
-            new Path(state[uuid], [])
-
-        isLoaded: (uuid) ->
-            state[uuid]?
+            # create a new zync object, and ask the server for updates
+            key = domain + '/' + uuid
+            unless state[key]?
+                log.debug("Fetching zync object #{domain}: #{uuid}")
+                state[key] = new ZyncState(domain, uuid, isCreate, isLocal)
+            new Path(state[key], [])
 
         # This is mainly for testing purposes
-        stateOf: (uuid) ->
-            clone(state[uuid])
+        stateOf: (domain, uuid) ->
+            clone(state[domain + '/' + uuid])
 
         fnsForUnitTests:
             normalizeJsonOp: normalizeJsonOp
@@ -1224,5 +1392,4 @@ SOFactory = (getUser, wsrouter) ->
             compose: compose
             apply: apply
     }
-
 

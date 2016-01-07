@@ -10,7 +10,7 @@ exports.config =
     javascripts:
       defaultExtension: 'coffee'
       joinTo:
-        'zync.js': /^app.shared-object.coffee/
+        'zync.js': /^app.(zync|schema).*.coffee/
         'unit-test-stubs.js': /^app.unit-test-stubs/
         'vendor.js': /^(vendor|bower_components)/
         'unit-tests.js': /^test.*.spec.coffee|app.pragmas.js/
