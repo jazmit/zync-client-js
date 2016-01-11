@@ -3,23 +3,23 @@ var WebSocket = {
   "CLOSED": 1
 };
 var fakeWSRouter = {
-  "addRoute": function(key, callback) {
+  addRoute: function(key, callback) {
     return {
-      "isOpen": function() { return true; },
-      "send": _.identity,
-      "close": _.identity
+      isOpen: function() { return true; },
+      send: _.identity,
+      close: _.identity
     };
   },
-  "onOpen": _.identity,
-  "onError": _.identity,
-  "onClose": _.identity
+  onOpen: _.identity,
+  onError: _.identity,
+  onClose: _.identity
 };
 var Logger = {
-  "get": function() {
+  get: function() {
     return {
-      "debug":   print,
-      "info":    print,
-      "warning": print
+      debug:   print,
+      info:    print,
+      warning: print
     };
   }
 };
@@ -57,6 +57,6 @@ function compose(aString, bString) {
 };
 function normalize(opString) {
     var op = JSON.parse(opString);
-    var result = Zync.fnsForUnitTests.normalizeJsonOp(op);
+    var result = doNormalize(op);
     return JSON.stringify(result);
 }

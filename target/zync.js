@@ -1,4 +1,139 @@
-var Zync;
+
+;var WSFactory;
+
+WSFactory = function(urls, $websocket, $rootScope) {
+  var connect, log, onCloseQ, onErrorQ, onOpenQ, reconnect, reconnecting, routes, websocketReconnectionDelay, ws;
+  websocketReconnectionDelay = 3000;
+  log = Logger.get("websocket");
+  ws = void 0;
+  onOpenQ = [];
+  onCloseQ = [];
+  onErrorQ = [];
+  routes = {};
+  reconnecting = false;
+  reconnect = function() {
+    reconnecting = true;
+    if (ws != null) {
+      ws.close();
+    }
+    return connect();
+  };
+  connect = function() {
+    if ((ws != null ? ws.readyState : void 0) === WebSocket.OPEN) {
+      return;
+    }
+    log.info("Websocket connecting...");
+    return ws = _.extend(new $websocket(urls.websocket), {
+      onopen: function(openEvent) {
+        var callback, error, _i, _len, _results;
+        log.info("Websocket connected");
+        reconnecting = false;
+        _results = [];
+        for (_i = 0, _len = onOpenQ.length; _i < _len; _i++) {
+          callback = onOpenQ[_i];
+          try {
+            _results.push(callback());
+          } catch (_error) {
+            error = _error;
+            _results.push(log.error("Error in websocket open handler ", error));
+          }
+        }
+        return _results;
+      },
+      onclose: function(closeEvent) {
+        var callback, error, _i, _len;
+        if (reconnecting) {
+          return;
+        }
+        for (_i = 0, _len = onCloseQ.length; _i < _len; _i++) {
+          callback = onCloseQ[_i];
+          try {
+            callback();
+          } catch (_error) {
+            error = _error;
+            log.error("Error in websocket close handler ", error);
+          }
+        }
+        log.info("Websocket closed, reconnecting in " + websocketReconnectionDelay + "ms");
+        return _.delay(connect, websocketReconnectionDelay);
+      },
+      onerror: function(errorEvent) {
+        var callback, error, _i, _len;
+        for (_i = 0, _len = onErrorQ.length; _i < _len; _i++) {
+          callback = onErrorQ[_i];
+          try {
+            callback();
+          } catch (_error) {
+            error = _error;
+            log.error("Error calling websocket error handling callback, original error " + errorEvent.message, error);
+          }
+        }
+        if (ws.readyState !== WebSocket.CLOSED) {
+          return log.error("Websocket error: " + errorEvent.message);
+        }
+      },
+      onmessage: function(frame) {
+        var callback, data, message, routingKey, splitAt;
+        data = frame.data;
+        splitAt = data.indexOf('|');
+        if (splitAt < 0) {
+          throw 'Illegal frame: ' + data;
+        }
+        routingKey = data.substring(0, splitAt);
+        message = data.substring(splitAt + 1);
+        callback = routes[routingKey];
+        if (callback != null) {
+          return callback(message);
+        } else {
+          return log.warn("Unroutable message received at client: " + data);
+        }
+      }
+    });
+  };
+  if ($rootScope && _.isFunction($rootScope.$on)) {
+    $rootScope.$on('loginSuccess', reconnect);
+    $rootScope.$on('logoutSuccess', reconnect);
+  }
+  connect();
+  return {
+    onOpen: function(fn) {
+      if (ws.readyState === WebSocket.OPEN) {
+        fn();
+      }
+      return onOpenQ.push(fn);
+    },
+    onClose: function(fn) {
+      return onCloseQ.push(fn);
+    },
+    onError: function(fn) {
+      return onErrorQ.push(fn);
+    },
+    addRoute: function(routingKey, callback) {
+      if (routes[routingKey] != null) {
+        throw "Attempt to claim already existing route " + routingKey;
+      }
+      routes[routingKey] = callback;
+      return {
+        isOpen: function() {
+          return ws.readyState === WebSocket.OPEN;
+        },
+        send: function(msg) {
+          if (ws.readyState === WebSocket.OPEN) {
+            return ws.send(routingKey + '|' + msg);
+          } else {
+            throw new Error("Cannot send because websocket is closed");
+          }
+        },
+        close: function() {
+          return routes[routingKey] = void 0;
+        }
+      };
+    }
+  };
+};
+;var Zync, ZyncFactory,
+  __indexOf = [].indexOf || function(item) { for (var i = 0, l = this.length; i < l; i++) { if (i in this && this[i] === item) return i; } return -1; },
+  __slice = [].slice;
 
 if (typeof Zync === "undefined" || Zync === null) {
   Zync = {};
@@ -65,9 +200,6 @@ Zync.Schema = {
     }
   }
 };
-;var ZyncFactory,
-  __indexOf = [].indexOf || function(item) { for (var i = 0, l = this.length; i < l; i++) { if (i in this && this[i] === item) return i; } return -1; },
-  __slice = [].slice;
 
 ZyncFactory = function(wsrouter, schemata) {
   var OFFLINE, ONLINE, Op, Path, REQUESTING_STATE, ZyncState, addOpToObject, apply, applyArrayOp, applyJsonOp, clone, commitToString, compose, composeJsonOps, composeSplice, composeSplices, createOp, deepFreeze, generateUuid, isChange, isKeep, isModify, isOp, listenerIdGen, log, normalizeJsonOp, opOf, opPostSplit, opSplit, opToString, parseModify, postLen, preLen, routes, spliceOpToString, state, subtype, transpose, transposeJsonOp, transposePath, transposeSplice, transposeSpliceOp, updateImage, updateListeners, userId;
@@ -119,7 +251,9 @@ ZyncFactory = function(wsrouter, schemata) {
     _results = [];
     for (_i = 0, _len = listeners.length; _i < _len; _i++) {
       _ref = listeners[_i], id = _ref[0], listener = _ref[1];
-      _results.push(listener(target, op));
+      _results.push(_.defer(function() {
+        return listener(target, op);
+      }));
     }
     return _results;
   };
@@ -1333,8 +1467,10 @@ ZyncFactory = function(wsrouter, schemata) {
         return fn(this.image());
       } else {
         return listenerId = this.onChange(function(image) {
-          fn(image);
-          return _this.unsubscribe(listenerId);
+          _this.unsubscribe(listenerId);
+          return _.defer((function() {
+            return fn(image);
+          }));
         });
       }
     };
